@@ -14,12 +14,12 @@ The sidecar runs two loops in parallel:
 
 | Subject | When emitted |
 |---------|-------------|
-| `immich.asset.upserted` | Asset created or updated (`AssetV2`). Includes `albumIds[]` resolved from the same batch. |
-| `immich.asset.trashed`  | Asset moved to trash (`AssetV2` with `isTrashed=true`). |
+| `immich.asset.upserted` | Asset created or updated (`AssetV2` with no `deletedAt`, or an `AssetExifV1` metadata edit). Carries `ownerId`, `checksum`, `assetType`, and `albumIds[]` resolved from the same batch. |
+| `immich.asset.trashed`  | Asset moved to trash (`AssetV2` with a non-null `deletedAt`). |
 | `immich.asset.deleted`  | Asset permanently deleted (`AssetDeleteV1`). |
-| `immich.album.changed`  | Album metadata created or updated (`AlbumV2`). |
+| `immich.album.changed`  | Album metadata created or updated (`AlbumV2`). Carries `name` and `description`. |
 | `immich.album.deleted`  | Album deleted (`AlbumDeleteV1`). |
-| `immich.album.membership` | Asset added to or removed from an album (`AlbumToAssetV1` / `AlbumToAssetDeleteV1`). `removed: true` on removals. |
+| `immich.album.membership` | Asset added to or removed from an album (`AlbumToAssetV1` / `AlbumToAssetDeleteV1`). `present: true` on add, `present: false` on removal. |
 
 The subject prefix (`immich`) is configurable via `NATS_SUBJECT_PREFIX`.
 
@@ -28,9 +28,12 @@ The subject prefix (`immich`) is configurable via `NATS_SUBJECT_PREFIX`.
 Asset upserted example (fields not relevant to the event type are omitted):
 ```json
 {
-  "type":     "asset.upserted",
-  "assetId":  "...",
-  "albumIds": ["...", "..."]
+  "type":      "asset.upserted",
+  "assetId":   "...",
+  "ownerId":   "...",
+  "checksum":  "...",
+  "assetType": "IMAGE",
+  "albumIds":  ["...", "..."]
 }
 ```
 
@@ -40,7 +43,7 @@ Album membership removal example:
   "type":    "album.membership",
   "albumId": "...",
   "assetId": "...",
-  "removed": true
+  "present": false
 }
 ```
 

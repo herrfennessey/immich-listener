@@ -14,7 +14,9 @@ import (
 	"github.com/herrfennessey/immich-listener/internal/events"
 )
 
-// makeStreamBody encodes a slice of syncRow values as newline-delimited JSON.
+func strPtr(s string) *string { return &s }
+
+// makeStreamBody encodes rows as newline-delimited JSON (the sync stream wire format).
 func makeStreamBody(rows []any) string {
 	var sb strings.Builder
 	enc := json.NewEncoder(&sb)
@@ -24,12 +26,12 @@ func makeStreamBody(rows []any) string {
 	return sb.String()
 }
 
-// streamAndAckServer returns a test server that serves the sync stream at /api/sync/stream
-// and records ack calls at /api/sync/ack.
-func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]syncAckRequest) {
+// streamAndAckServer serves the sync stream at /api/sync/stream and records ack
+// calls at /api/sync/ack.
+func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]syncAckSetRequest) {
 	t.Helper()
 	var mu sync.Mutex
-	var acks []syncAckRequest
+	var acks []syncAckSetRequest
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -42,7 +44,7 @@ func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]s
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(streamBody))
 		case r.Method == http.MethodPost && r.URL.Path == "/api/sync/ack":
-			var ack syncAckRequest
+			var ack syncAckSetRequest
 			_ = json.NewDecoder(r.Body).Decode(&ack)
 			mu.Lock()
 			acks = append(acks, ack)
@@ -56,21 +58,21 @@ func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]s
 }
 
 func TestSyncStreamConsumer_RunOnce(t *testing.T) {
-	// Fixtures match the real Immich wire format:
-	//   entity rows:  { "type": "...", "ids": [...], "data": {...} }
-	//   SyncAckV1:    { "type": "SyncAckV1", "ids": ["<token>", "COMPLETE_ID"] }
-	//   SyncCompleteV1: { "type": "SyncCompleteV1" }
+	// Rows use the real Immich wire shape: {type, ack, data}. The ack is the
+	// pipe-delimited resume token "<type>|<updateId>".
 	rows := []any{
-		syncRow{Type: "AssetV2", IDs: []string{"asset-1"}, Data: syncData{ID: "asset-1"}},
-		syncRow{Type: "AssetV2", IDs: []string{"asset-trashed"}, Data: syncData{ID: "asset-trashed", IsTrashed: true}},
-		syncRow{Type: "AssetDeleteV1", IDs: []string{"asset-2"}, Data: syncData{ID: "asset-2"}},
-		syncRow{Type: "AlbumV2", IDs: []string{"album-1"}, Data: syncData{ID: "album-1"}},
-		syncRow{Type: "AlbumDeleteV1", IDs: []string{"album-2"}, Data: syncData{ID: "album-2"}},
-		syncRow{Type: "AlbumToAssetV1", Data: syncData{AlbumID: "album-3", AssetID: "asset-3"}},
-		syncRow{Type: "AlbumToAssetDeleteV1", Data: syncData{AlbumID: "album-4", AssetID: "asset-4"}},
-		syncRow{Type: "AssetExifV1", IDs: []string{"asset-5"}, Data: syncData{ID: "asset-5"}}, // subscribed but not published
-		syncRow{Type: "SyncAckV1", IDs: []string{"tok-abc"}},
-		syncRow{Type: "SyncCompleteV1"},
+		syncRow{Type: "AssetV2", Ack: "AssetV2|100", Data: syncData{ID: "asset-1", OwnerID: "owner-1", Checksum: "chk", AssetType: "IMAGE"}},
+		syncRow{Type: "AssetV2", Ack: "AssetV2|101", Data: syncData{ID: "asset-trashed", DeletedAt: strPtr("2026-08-17T00:00:00Z")}},
+		syncRow{Type: "AssetDeleteV1", Ack: "AssetDeleteV1|5", Data: syncData{AssetID: "asset-2"}},
+		syncRow{Type: "AssetExifV1", Ack: "AssetExifV1|9", Data: syncData{AssetID: "asset-3"}},
+		syncRow{Type: "AlbumV2", Ack: "AlbumV2|3", Data: syncData{ID: "album-1", Name: "Trip", Description: "desc"}},
+		syncRow{Type: "AlbumDeleteV1", Ack: "AlbumDeleteV1|2", Data: syncData{AlbumID: "album-2"}},
+		syncRow{Type: "AlbumToAssetV1", Ack: "AlbumToAssetV1|7", Data: syncData{AlbumID: "album-3", AssetID: "asset-1"}},
+		syncRow{Type: "AlbumToAssetDeleteV1", Ack: "AlbumToAssetDeleteV1|8", Data: syncData{AlbumID: "album-4", AssetID: "asset-4"}},
+		// Control rows: SyncResetV1's ack must never be echoed back; SyncCompleteV1
+		// carries no data and is not published.
+		syncRow{Type: "SyncResetV1", Ack: "SyncResetV1|0"},
+		syncRow{Type: "SyncCompleteV1", Ack: "SyncCompleteV1|999"},
 	}
 
 	srv, acks := streamAndAckServer(t, makeStreamBody(rows))
@@ -89,16 +91,15 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 		t.Fatalf("runOnce error: %v", err)
 	}
 
-	// Verify published events (AlbumToAsset rows contribute albumIds to AssetV2).
-	// asset-3 appears in AlbumToAssetV1 → asset-3 upserted should carry albumIds.
 	wantTypes := []events.Type{
-		events.AssetUpserted,  // asset-1
-		events.AssetTrashed,   // asset-trashed
-		events.AssetDeleted,   // asset-2
-		events.AlbumChanged,   // album-1
-		events.AlbumDeleted,   // album-2
-		events.AlbumMembership, // album-3/asset-3 added
-		events.AlbumMembership, // album-4/asset-4 removed
+		events.AssetUpserted,   // asset-1
+		events.AssetTrashed,    // asset-trashed (deletedAt set)
+		events.AssetDeleted,    // asset-2
+		events.AssetUpserted,   // asset-3 (from AssetExifV1)
+		events.AlbumChanged,    // album-1
+		events.AlbumDeleted,    // album-2
+		events.AlbumMembership, // album-3 / asset-1 added
+		events.AlbumMembership, // album-4 / asset-4 removed
 	}
 	if len(published) != len(wantTypes) {
 		t.Fatalf("published %d events, want %d; got: %+v", len(published), len(wantTypes), published)
@@ -109,17 +110,58 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 		}
 	}
 
-	// AlbumMembership removal should have Removed=true.
-	if !published[6].Removed {
-		t.Error("AlbumToAssetDeleteV1 event should have Removed=true")
+	// asset-1 upsert should carry albumIds resolved from the AlbumToAssetV1 row,
+	// plus the enrichment fields from AssetV2 data.
+	up := published[0]
+	if len(up.AlbumIDs) != 1 || up.AlbumIDs[0] != "album-3" {
+		t.Errorf("asset-1 AlbumIDs = %v, want [album-3]", up.AlbumIDs)
+	}
+	if up.OwnerID != "owner-1" || up.Checksum != "chk" || up.AssetType != "IMAGE" {
+		t.Errorf("asset-1 enrichment = %+v", up)
 	}
 
-	// Ack must have been called exactly once with the batch token.
+	// Delete events must carry the id from the correct per-type data field.
+	if published[2].AssetID != "asset-2" {
+		t.Errorf("AssetDeleteV1 AssetID = %q, want asset-2", published[2].AssetID)
+	}
+	if published[5].AlbumID != "album-2" {
+		t.Errorf("AlbumDeleteV1 AlbumID = %q, want album-2", published[5].AlbumID)
+	}
+
+	// Membership present flags.
+	if published[6].Present == nil || !*published[6].Present {
+		t.Error("AlbumToAssetV1 event should have present=true")
+	}
+	if published[7].Present == nil || *published[7].Present {
+		t.Error("AlbumToAssetDeleteV1 event should have present=false")
+	}
+
+	// Ack called exactly once, carrying the final ack per type, AssetV2 collapsed
+	// to its last row (101), SyncResetV1 excluded.
 	if len(*acks) != 1 {
 		t.Fatalf("ack called %d times, want 1", len(*acks))
 	}
-	if len((*acks)[0].Acks) != 1 || (*acks)[0].Acks[0] != "tok-abc" {
-		t.Errorf("ack payload = %+v, want acks=[tok-abc]", (*acks)[0])
+	got := map[string]bool{}
+	for _, a := range (*acks)[0].Acks {
+		got[a] = true
+	}
+	wantAcks := []string{
+		"AssetV2|101", "AssetDeleteV1|5", "AssetExifV1|9", "AlbumV2|3",
+		"AlbumDeleteV1|2", "AlbumToAssetV1|7", "AlbumToAssetDeleteV1|8", "SyncCompleteV1|999",
+	}
+	if len((*acks)[0].Acks) != len(wantAcks) {
+		t.Fatalf("acks = %v, want %d entries", (*acks)[0].Acks, len(wantAcks))
+	}
+	for _, a := range wantAcks {
+		if !got[a] {
+			t.Errorf("missing ack %q in %v", a, (*acks)[0].Acks)
+		}
+	}
+	if got["AssetV2|100"] {
+		t.Error("AssetV2|100 should have been collapsed to the later AssetV2|101")
+	}
+	if got["SyncResetV1|0"] {
+		t.Error("SyncResetV1 ack must never be echoed back")
 	}
 }
 
@@ -127,7 +169,7 @@ func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	var receivedTypes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/sync/stream" {
-			var req syncRequest
+			var req syncStreamRequest
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			receivedTypes = req.Types
 			w.WriteHeader(http.StatusOK)
@@ -144,40 +186,30 @@ func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	if len(receivedTypes) == 0 {
 		t.Fatal("no types sent in sync stream request")
 	}
-	// Verify request uses SyncRequestType values (plural), not SyncEntityType values.
+	// These must be SyncRequestType (plural) values, not entity types.
 	wantTypes := map[string]bool{
-		"AssetsV2":        true,
-		"AssetExifsV1":    true,
-		"AlbumsV2":        true,
-		"AlbumToAssetsV1": true,
+		"AssetsV2": true, "AssetExifsV1": true,
+		"AlbumsV2": true, "AlbumToAssetsV1": true,
 	}
 	for _, typ := range receivedTypes {
 		delete(wantTypes, typ)
+		if strings.HasSuffix(typ, "DeleteV1") {
+			t.Errorf("request type %q looks like an entity type, not a SyncRequestType", typ)
+		}
 	}
 	for missing := range wantTypes {
-		t.Errorf("missing required SyncRequestType in request: %s", missing)
-	}
-	// Entity types (singular) must NOT appear in the request body.
-	badTypes := []string{"AssetV2", "AlbumV2", "AssetDeleteV1", "AlbumDeleteV1", "AlbumToAssetV1", "AlbumToAssetDeleteV1"}
-	for _, typ := range receivedTypes {
-		for _, bad := range badTypes {
-			if typ == bad {
-				t.Errorf("request must not contain SyncEntityType %q (use SyncRequestType instead)", typ)
-			}
-		}
+		t.Errorf("missing required request type: %s", missing)
 	}
 }
 
 func TestSyncStreamConsumer_PublishFailPreventsAck(t *testing.T) {
 	rows := []any{
-		syncRow{Type: "AssetV2", IDs: []string{"a1"}, Data: syncData{ID: "a1"}},
-		syncRow{Type: "SyncAckV1", IDs: []string{"tok-xyz"}},
-		syncRow{Type: "SyncCompleteV1"},
+		syncRow{Type: "AssetV2", Ack: "AssetV2|1", Data: syncData{ID: "a1"}},
 	}
 	srv, acks := streamAndAckServer(t, makeStreamBody(rows))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key",
+	consumer := NewSyncStreamConsumer(srv.URL, "test-key",
 		func(_ context.Context, _ events.Event) error {
 			return fmt.Errorf("nats unavailable")
 		})
@@ -193,8 +225,7 @@ func TestSyncStreamConsumer_PublishFailPreventsAck(t *testing.T) {
 	}
 }
 
-func TestSyncStreamConsumer_NoAckWhenNoCheckpoint(t *testing.T) {
-	// Empty response — no checkpoint line — ack should NOT be called.
+func TestSyncStreamConsumer_NoAckWhenEmpty(t *testing.T) {
 	var ackCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -238,7 +269,7 @@ func TestSyncStreamConsumer_HTTPError(t *testing.T) {
 }
 
 func TestSyncStreamConsumer_InvalidJSON(t *testing.T) {
-	body := "not-json\n" + `{"type":"AssetV2","ids":["a1"],"data":{"id":"a1"}}` + "\n"
+	body := "not-json\n" + `{"type":"AssetV2","ack":"AssetV2|1","data":{"id":"a1"}}` + "\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(body))
@@ -269,14 +300,15 @@ func TestSyncRowToEvent_AllTypes(t *testing.T) {
 		wantTyp events.Type
 	}{
 		{syncRow{Type: "AssetV2", Data: syncData{ID: "a"}}, true, events.AssetUpserted},
-		{syncRow{Type: "AssetV2", Data: syncData{ID: "a", IsTrashed: true}}, true, events.AssetTrashed},
-		{syncRow{Type: "AssetDeleteV1", Data: syncData{ID: "a"}}, true, events.AssetDeleted},
+		{syncRow{Type: "AssetV2", Data: syncData{ID: "a", DeletedAt: strPtr("2026-01-01T00:00:00Z")}}, true, events.AssetTrashed},
+		{syncRow{Type: "AssetExifV1", Data: syncData{AssetID: "a"}}, true, events.AssetUpserted},
+		{syncRow{Type: "AssetDeleteV1", Data: syncData{AssetID: "a"}}, true, events.AssetDeleted},
 		{syncRow{Type: "AlbumV2", Data: syncData{ID: "al"}}, true, events.AlbumChanged},
-		{syncRow{Type: "AlbumDeleteV1", Data: syncData{ID: "al"}}, true, events.AlbumDeleted},
+		{syncRow{Type: "AlbumDeleteV1", Data: syncData{AlbumID: "al"}}, true, events.AlbumDeleted},
 		{syncRow{Type: "AlbumToAssetV1"}, true, events.AlbumMembership},
 		{syncRow{Type: "AlbumToAssetDeleteV1"}, true, events.AlbumMembership},
-		{syncRow{Type: "AssetExifV1"}, false, ""},
 		{syncRow{Type: "AlbumUserV1"}, false, ""},
+		{syncRow{Type: "SyncCompleteV1"}, false, ""},
 		{syncRow{Type: "unknown"}, false, ""},
 	}
 	for _, tt := range tests {
@@ -288,6 +320,19 @@ func TestSyncRowToEvent_AllTypes(t *testing.T) {
 		if ok && ev.Type != tt.wantTyp {
 			t.Errorf("syncRowToEvent(%q) type=%q, want %q", tt.row.Type, ev.Type, tt.wantTyp)
 		}
+	}
+}
+
+func TestSyncRowToEvent_DeleteUsesCorrectID(t *testing.T) {
+	emptyIdx := map[string][]string{}
+
+	ev, _ := syncRowToEvent(syncRow{Type: "AssetDeleteV1", Data: syncData{AssetID: "asset-x"}}, emptyIdx)
+	if ev.AssetID != "asset-x" {
+		t.Errorf("AssetDeleteV1 AssetID = %q, want asset-x (from data.assetId)", ev.AssetID)
+	}
+	ev, _ = syncRowToEvent(syncRow{Type: "AlbumDeleteV1", Data: syncData{AlbumID: "album-x"}}, emptyIdx)
+	if ev.AlbumID != "album-x" {
+		t.Errorf("AlbumDeleteV1 AlbumID = %q, want album-x (from data.albumId)", ev.AlbumID)
 	}
 }
 
@@ -321,3 +366,20 @@ func TestBuildAssetAlbumsIndex(t *testing.T) {
 	}
 }
 
+func TestCollectAcks(t *testing.T) {
+	rows := []syncRow{
+		{Type: "AssetV2", Ack: "AssetV2|1"},
+		{Type: "AssetV2", Ack: "AssetV2|2"},         // last wins
+		{Type: "SyncAckV1", Ack: "AssetV2|3"},       // backfill marker, keyed by real type
+		{Type: "AlbumV2", Ack: "AlbumV2|9"},
+		{Type: "SyncResetV1", Ack: "SyncResetV1|0"}, // must be dropped
+		{Type: "AssetV2"},                           // no ack, ignored
+	}
+	acks := collectAcks(rows)
+	got := strings.Join(acks, ",")
+	// AssetV2 collapses to its last ack (3, from the SyncAckV1 marker); AlbumV2 kept;
+	// SyncResetV1 dropped. Order is first-seen-type.
+	if got != "AssetV2|3,AlbumV2|9" {
+		t.Errorf("collectAcks = %q, want %q", got, "AssetV2|3,AlbumV2|9")
+	}
+}
