@@ -12,21 +12,20 @@ import (
 	"github.com/coder/websocket"
 )
 
-// SocketListener connects to the Immich Socket.IO gateway and acts as a
-// doorbell: any recognised lifecycle event signals the sync-stream consumer
-// to run immediately rather than waiting for the next tick.
+// SocketListener connects to the Immich Socket.IO gateway. A known event sends a
+// signal on the wake channel. The signal makes the sync consumer run at once
+// instead of at the next tick.
 //
-// The sidecar is deliberately dumb on the socket path — event contents are
-// ignored.  All bus messages are produced exclusively by the sync stream
-// (publish-then-ack) so there is no double-publishing and no ID mismatch.
+// The listener does not read the event content. Only the sync stream produces
+// events. This prevents duplicate events and ID mismatches.
 type SocketListener struct {
 	baseURL string
 	apiKey  string
 	wake    chan<- struct{}
 }
 
-// NewSocketListener creates a listener.  wake is sent to whenever a known
-// Immich lifecycle event arrives.
+// NewSocketListener creates a listener. wake receives a signal for each known
+// Immich event.
 func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}) *SocketListener {
 	return &SocketListener{
 		baseURL: baseURL,
@@ -35,8 +34,8 @@ func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}) *SocketList
 	}
 }
 
-// Run connects to the Socket.IO endpoint and loops until ctx is cancelled,
-// reconnecting with exponential back-off on error.
+// Run connects to the Socket.IO endpoint until ctx ends. After an error, Run
+// reconnects with exponential back-off.
 func (l *SocketListener) Run(ctx context.Context) {
 	backoff := time.Second
 	for {
@@ -59,10 +58,10 @@ func (l *SocketListener) Run(ctx context.Context) {
 	}
 }
 
-// connect establishes one WebSocket session.  It returns when the connection
-// closes or the context is cancelled.
+// connect opens one WebSocket session. connect returns when the connection
+// closes or when ctx ends.
 func (l *SocketListener) connect(ctx context.Context) error {
-	// Build WebSocket URL: http→ws, https→wss.
+	// Change the URL scheme: http to ws, https to wss.
 	wsURL := l.baseURL
 	if strings.HasPrefix(wsURL, "http://") {
 		wsURL = "ws://" + wsURL[7:]
@@ -153,8 +152,7 @@ func (l *SocketListener) handleSocketIOMessage(payload string) error {
 	return l.dispatchSocketEvent(name)
 }
 
-// knownSocketEvents is the set of Immich lifecycle event names that should
-// trigger a sync-stream pass.
+// knownSocketEvents lists the Immich event names that start a sync pass.
 var knownSocketEvents = map[string]bool{
 	"on_upload_success": true,
 	"on_asset_update":   true,
@@ -164,13 +162,13 @@ var knownSocketEvents = map[string]bool{
 	"on_album_update":   true,
 }
 
-// dispatchSocketEvent signals the sync-stream consumer if the event name is known.
+// dispatchSocketEvent sends a wake signal for a known event name.
 func (l *SocketListener) dispatchSocketEvent(name string) error {
 	if !knownSocketEvents[name] {
-		slog.Debug("socket.io: ignoring unknown event", "name", name)
+		slog.Debug("socket.io: ignore unknown event", "name", name)
 		return nil
 	}
-	slog.Debug("socket.io: doorbell", "name", name)
+	slog.Debug("socket.io: wake", "name", name)
 	select {
 	case l.wake <- struct{}{}:
 	default:

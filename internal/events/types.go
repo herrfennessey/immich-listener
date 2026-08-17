@@ -23,36 +23,31 @@ const (
 	AlbumMembership Type = "album.membership"
 )
 
-// Event is the envelope published on every NATS subject.
-//
-// The payload carries identity plus the handful of fields the spec's subject
-// table calls for; downstream consumers re-fetch full state from Immich using
-// the IDs provided.
+// Event is the message published on a subject. The payload holds IDs and a few
+// fields. A downstream reads full state from Immich with the IDs.
 type Event struct {
-	// Type identifies the kind of change.
+	// Type is the kind of change.
 	Type Type `json:"type"`
 
-	// AssetID is set for asset events and for AlbumMembership events.
+	// AssetID is set for asset events and AlbumMembership events.
 	AssetID string `json:"assetId,omitempty"`
-	// AlbumID is set for album events and for AlbumMembership events.
+	// AlbumID is set for album events and AlbumMembership events.
 	AlbumID string `json:"albumId,omitempty"`
-	// AlbumIDs is the set of albums the asset gained or lost membership of in
-	// the same sync batch, resolved from the AlbumToAsset deltas.  Set on
-	// AssetUpserted.  Note this is the in-batch delta, not the asset's full
-	// album set (see sync_stream.go).
+	// AlbumIDs is the full set of albums that contain the asset. It is set on
+	// AssetUpserted.
 	AlbumIDs []string `json:"albumIds,omitempty"`
 
-	// OwnerID, Checksum and AssetType enrich AssetUpserted (from AssetV2 data).
+	// OwnerID, Checksum, and AssetType are set on AssetUpserted.
 	OwnerID   string `json:"ownerId,omitempty"`
 	Checksum  string `json:"checksum,omitempty"`
 	AssetType string `json:"assetType,omitempty"`
 
-	// Name and Description enrich AlbumChanged (from AlbumV2 data).
+	// Name and Description are set on AlbumChanged.
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
 
-	// Present is set only on AlbumMembership events: true when the asset was
-	// added to the album, false when it was removed.
+	// Present is set on AlbumMembership. true means the asset was added to the
+	// album. false means the asset was removed.
 	Present *bool `json:"present,omitempty"`
 }
 

@@ -1,4 +1,7 @@
-// Package nats wraps the NATS JetStream client used by the sidecar.
+// Package nats is a Publisher adapter for NATS JetStream.
+//
+// It implements core.Publisher. It is one possible queue. To use a different
+// queue, write a new adapter that implements core.Publisher.
 package nats
 
 import (
@@ -8,12 +11,13 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/herrfennessey/immich-listener/internal/core"
 	"github.com/herrfennessey/immich-listener/internal/events"
 	natsclient "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// Publisher publishes events to a NATS JetStream stream.
+// Publisher sends events to a NATS JetStream stream.
 type Publisher struct {
 	nc     *natsclient.Conn
 	js     jetstream.JetStream
@@ -21,7 +25,10 @@ type Publisher struct {
 	prefix string
 }
 
-// NewPublisher connects to NATS and ensures the stream exists, then returns a Publisher.
+// compile-time check that Publisher satisfies the port.
+var _ core.Publisher = (*Publisher)(nil)
+
+// NewPublisher connects to NATS and makes sure the stream exists.
 func NewPublisher(ctx context.Context, url, streamName, subjectPrefix string) (*Publisher, error) {
 	nc, err := natsclient.Connect(url,
 		natsclient.RetryOnFailedConnect(true),
@@ -38,7 +45,7 @@ func NewPublisher(ctx context.Context, url, streamName, subjectPrefix string) (*
 		return nil, fmt.Errorf("jetstream context: %w", err)
 	}
 
-	// Ensure the stream exists; update config if it already exists.
+	// Create the stream, or update it if it exists.
 	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 		Name:        streamName,
 		Subjects:    []string{subjectPrefix + ".>"},
@@ -54,28 +61,21 @@ func NewPublisher(ctx context.Context, url, streamName, subjectPrefix string) (*
 	}
 
 	slog.Info("connected to NATS JetStream", "stream", streamName, "subjects", subjectPrefix+".>")
-
 	return &Publisher{nc: nc, js: js, stream: streamName, prefix: subjectPrefix}, nil
 }
 
-// Publish marshals the event and publishes it to JetStream.
+// Publish sends the event and waits for the JetStream acknowledgement.
 func (p *Publisher) Publish(ctx context.Context, ev events.Event) error {
 	data, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
 	subject := ev.Subject(p.prefix)
-	_, err = p.js.Publish(ctx, subject, data)
-	if err != nil {
+	if _, err := p.js.Publish(ctx, subject, data); err != nil {
 		return fmt.Errorf("publish to %q: %w", subject, err)
 	}
 	slog.Debug("published event", "subject", subject, "assetId", ev.AssetID, "albumId", ev.AlbumID)
 	return nil
-}
-
-// JetStream returns the underlying JetStream context, e.g. for opening a KV store.
-func (p *Publisher) JetStream() jetstream.JetStream {
-	return p.js
 }
 
 // Close drains and closes the NATS connection.

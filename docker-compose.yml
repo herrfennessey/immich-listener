@@ -1,4 +1,5 @@
 services:
+  # NATS JetStream is the default queue. The sidecar ships a NATS adapter.
   nats:
     image: nats:2-alpine
     command: ["--jetstream", "--store_dir=/data"]
@@ -17,25 +18,69 @@ services:
       NATS_URL: nats://nats:4222
       NATS_STREAM_NAME: ${NATS_STREAM_NAME:-IMMICH}
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-immich}
-      MEMBERSHIP_BUCKET: ${MEMBERSHIP_BUCKET:-immich_asset_albums}
       SYNC_INTERVAL: ${SYNC_INTERVAL:-30s}
       SOCKETIO_ENABLED: ${SOCKETIO_ENABLED:-true}
     networks:
-      - default # reach nats over this project's own network
-      - immich  # reach immich-server over Immich's network (declared external below)
+      - default # reach nats over this project's network
+      - immich  # reach immich-server over Immich's network (external, below)
     depends_on:
       - nats
     restart: unless-stopped
 
+# ---------------------------------------------------------------------------
+# Other self-hosted queues.
+#
+# The sidecar sends events through the Publisher port (internal/core). NATS is
+# the only adapter in this repository. To use one of the queues below, write an
+# adapter that implements core.Publisher, wire it in cmd/sidecar/main.go, then
+# uncomment the matching service. Each example is a common self-hosted option.
+# ---------------------------------------------------------------------------
+#
+#  # Redis (Streams). Small footprint. Use XADD to publish.
+#  redis:
+#    image: redis:7-alpine
+#    command: ["redis-server", "--appendonly", "yes"]
+#    volumes:
+#      - redis-data:/data
+#    restart: unless-stopped
+#
+#  # RabbitMQ. Topic exchange with a management UI on 15672.
+#  rabbitmq:
+#    image: rabbitmq:3-management-alpine
+#    ports:
+#      - "5672:5672"
+#      - "15672:15672"
+#    volumes:
+#      - rabbitmq-data:/var/lib/rabbitmq
+#    restart: unless-stopped
+#
+#  # Redpanda. Kafka API, single binary, no ZooKeeper.
+#  redpanda:
+#    image: redpandadata/redpanda:latest
+#    command:
+#      - redpanda start
+#      - --smp 1
+#      - --overprovisioned
+#      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+#      - --advertise-kafka-addr PLAINTEXT://redpanda:9092
+#    ports:
+#      - "9092:9092"
+#    volumes:
+#      - redpanda-data:/var/lib/redpanda/data
+#    restart: unless-stopped
+
 networks:
-  # Immich runs as its own, separate Compose project, so its containers live on a
-  # different Docker network. Joining that network is what lets the sidecar
-  # resolve `immich-server` by name. Compose names a project's default network
-  # "<project>_default" (e.g. "immich_default"); find yours with `docker network
-  # ls` and set IMMICH_NETWORK to match. See the README for the full walkthrough.
+  # Immich runs as its own Compose project, so its containers use a separate
+  # Docker network. The sidecar joins that network to reach immich-server by
+  # name. Compose names a project's network "<project>_default" (for example
+  # "immich_default"). Find yours with "docker network ls" and set
+  # IMMICH_NETWORK. See the README "Connecting to Immich" section.
   immich:
     external: true
     name: ${IMMICH_NETWORK:-immich_default}
 
 volumes:
   nats-data:
+  # redis-data:
+  # rabbitmq-data:
+  # redpanda-data:

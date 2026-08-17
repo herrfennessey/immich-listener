@@ -1,3 +1,5 @@
+github.com/Netflix/go-env v0.1.2 h1:0DRoLR9lECQ9Zqvkswuebm3jJ/2enaDX6Ei8/Z+EnK0=
+github.com/Netflix/go-env v0.1.2/go.mod h1:WlIhYi++8FlKNJtrop1mjXYAJMzv1f43K4MqCoh0yGE=
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
 github.com/klauspost/compress v1.18.5 h1:/h1gH5Ce+VWNLSWqPzOVn6XBO+vJbCNGvjoaGBFW2IE=

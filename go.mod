@@ -3,6 +3,7 @@ module github.com/herrfennessey/immich-listener
 go 1.25.0
 
 require (
+	github.com/Netflix/go-env v0.1.2
 	github.com/coder/websocket v1.8.15
 	github.com/nats-io/nats.go v1.53.1
 )

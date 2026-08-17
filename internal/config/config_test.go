@@ -30,8 +30,8 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.ImmichBaseURL != "http://immich-server:2283" {
 		t.Errorf("ImmichBaseURL = %q, want default", cfg.ImmichBaseURL)
 	}
-	if cfg.NATSUrl != "nats://localhost:4222" {
-		t.Errorf("NATSUrl = %q, want default", cfg.NATSUrl)
+	if cfg.NATSURL != "nats://localhost:4222" {
+		t.Errorf("NATSURL = %q, want default", cfg.NATSURL)
 	}
 	if cfg.NATSStreamName != "IMMICH" {
 		t.Errorf("NATSStreamName = %q, want IMMICH", cfg.NATSStreamName)

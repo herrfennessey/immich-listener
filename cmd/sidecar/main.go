@@ -1,12 +1,13 @@
-// Command sidecar is the Immich event-to-NATS bridge.
+// Command sidecar connects Immich events to a message queue.
 //
-// It connects to the Immich Socket.IO gateway as a low-latency doorbell and
-// continuously polls /api/sync/stream for durable, checkpointed delivery.
-// All events are published to a NATS JetStream stream as JSON, and the
-// server-side Immich cursor is only advanced after each batch is durably on
-// the bus.
+// It holds a Socket.IO connection for low-latency signals and polls
+// /api/sync/stream for durable, checkpointed delivery. It sends every change to
+// a Publisher adapter, then advances the Immich cursor.
 //
-// Configuration is entirely via environment variables; see internal/config.
+// The queue is a port (see internal/core). This binary uses the NATS adapter.
+// To use a different queue, add an adapter and wire it here.
+//
+// The environment holds the configuration. See internal/config.
 package main
 
 import (
@@ -16,10 +17,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	natsadapter "github.com/herrfennessey/immich-listener/internal/adapters/nats"
 	"github.com/herrfennessey/immich-listener/internal/config"
-	"github.com/herrfennessey/immich-listener/internal/events"
 	immichpkg "github.com/herrfennessey/immich-listener/internal/immich"
-	natspkg "github.com/herrfennessey/immich-listener/internal/nats"
 )
 
 func main() {
@@ -36,28 +36,21 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	pub, err := natspkg.NewPublisher(ctx, cfg.NATSUrl, cfg.NATSStreamName, cfg.NATSSubjectPrefix)
+	// Outbound adapter: the message queue. Replace this to use another queue.
+	publisher, err := natsadapter.NewPublisher(ctx, cfg.NATSURL, cfg.NATSStreamName, cfg.NATSSubjectPrefix)
 	if err != nil {
 		slog.Error("nats publisher error", "err", err)
 		os.Exit(1)
 	}
-	defer pub.Close()
+	defer publisher.Close()
 
-	publish := func(ctx context.Context, ev events.Event) error {
-		return pub.Publish(ctx, ev)
-	}
+	// AlbumResolver reads album membership from the Immich API.
+	albums := immichpkg.NewAlbumClient(cfg.ImmichBaseURL, cfg.ImmichAPIKey)
 
-	membership, err := natspkg.NewMembershipStore(ctx, pub.JetStream(), cfg.MembershipBucket)
-	if err != nil {
-		slog.Error("membership store error", "err", err)
-		os.Exit(1)
-	}
-
-	// wake is used by the socket listener to poke the sync stream consumer
-	// into running immediately rather than waiting for the next tick.
+	// wake lets the socket listener start a sync pass at once.
 	wake := make(chan struct{}, 1)
 
-	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, cfg.ImmichAPIKey, publish, membership)
+	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, cfg.ImmichAPIKey, publisher, albums)
 
 	if cfg.SocketIOEnabled {
 		socketListener := immichpkg.NewSocketListener(cfg.ImmichBaseURL, cfg.ImmichAPIKey, wake)
@@ -66,7 +59,7 @@ func main() {
 
 	slog.Info("sidecar started",
 		"immich", cfg.ImmichBaseURL,
-		"nats", cfg.NATSUrl,
+		"nats", cfg.NATSURL,
 		"stream", cfg.NATSStreamName,
 		"socketio", cfg.SocketIOEnabled,
 	)

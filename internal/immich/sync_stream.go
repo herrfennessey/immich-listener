@@ -1,4 +1,4 @@
-// Package immich implements consumers for the Immich server API.
+// Package immich reads changes from the Immich server API.
 package immich
 
 import (
@@ -13,61 +13,49 @@ import (
 	"strings"
 	"time"
 
+	"github.com/herrfennessey/immich-listener/internal/core"
 	"github.com/herrfennessey/immich-listener/internal/events"
 )
 
-// syncRequestTypes is the set of SyncRequestType values the sidecar subscribes
-// to on POST /api/sync/stream.
-//
-// These are Immich's *request* type names (plural), which are distinct from the
-// *entity* type names (singular) that come back on each response row.  A single
-// request type yields several entity types — e.g. AssetsV2 produces both AssetV2
-// and AssetDeleteV1 rows.
+// syncRequestTypes lists the SyncRequestType values the sidecar subscribes to.
+// These are request type names (plural). They differ from the entity type names
+// (singular) in each response row. One request type returns several entity
+// types. AssetsV2 returns both AssetV2 and AssetDeleteV1 rows.
 var syncRequestTypes = []string{
-	"AssetsV2",        // AssetV2 (upsert/trash) + AssetDeleteV1 (permanent delete)
+	"AssetsV2",        // AssetV2 (upsert/trash) and AssetDeleteV1 (permanent delete)
 	"AssetExifsV1",    // AssetExifV1 (metadata edits)
-	"AlbumsV2",        // AlbumV2 (metadata) + AlbumDeleteV1
-	"AlbumToAssetsV1", // AlbumToAssetV1 / AlbumToAssetDeleteV1 (membership)
+	"AlbumsV2",        // AlbumV2 (metadata) and AlbumDeleteV1
+	"AlbumToAssetsV1", // AlbumToAssetV1 and AlbumToAssetDeleteV1 (membership)
 }
 
-// AlbumResolver maintains and answers the asset → albums membership index. It is
-// updated from AlbumToAsset deltas and queried to enrich asset upserts with the
-// asset's full album set (see MembershipStore in internal/nats).
-type AlbumResolver interface {
-	Add(ctx context.Context, assetID, albumID string) error
-	Remove(ctx context.Context, assetID, albumID string) error
-	Albums(ctx context.Context, assetID string) ([]string, error)
-}
-
-// SyncStreamConsumer reads from POST /api/sync/stream, converts deltas to Events,
-// publishes them to NATS JetStream, and only then advances the server-side cursor
-// via POST /api/sync/ack.  If any publish fails the cursor is NOT advanced, so the
-// next pass replays the same batch.
+// SyncStreamConsumer reads POST /api/sync/stream, converts each delta to an
+// event, sends it to the Publisher, and then advances the Immich cursor with
+// POST /api/sync/ack. If a publish fails, the consumer does not ack, so Immich
+// sends the same batch again.
 //
-// The sidecar holds no local cursor: the checkpoint lives in Immich's
-// session_sync_checkpoint table, keyed on the session behind the API key.
+// The sidecar keeps no local cursor. Immich stores the cursor in the
+// session_sync_checkpoint table for the session of the API key.
 type SyncStreamConsumer struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
-	publish    func(context.Context, events.Event) error
-	albums     AlbumResolver
+	publisher  core.Publisher
+	albums     core.AlbumResolver
 }
 
-// NewSyncStreamConsumer creates a consumer.  publish is called for every event
-// parsed and must confirm durable delivery (NATS JetStream ack) before returning nil.
-// albums maintains the asset→albums membership index used to enrich asset upserts.
-func NewSyncStreamConsumer(baseURL, apiKey string, publish func(context.Context, events.Event) error, albums AlbumResolver) *SyncStreamConsumer {
+// NewSyncStreamConsumer creates a consumer. publisher receives every event.
+// albums returns the album IDs for an asset upsert.
+func NewSyncStreamConsumer(baseURL, apiKey string, publisher core.Publisher, albums core.AlbumResolver) *SyncStreamConsumer {
 	return &SyncStreamConsumer{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 5 * time.Minute},
-		publish:    publish,
+		publisher:  publisher,
 		albums:     albums,
 	}
 }
 
-// Run reads the sync stream on every tick or wake signal until ctx is cancelled.
+// Run reads the sync stream on each tick or wake signal. Run stops when ctx ends.
 func (s *SyncStreamConsumer) Run(ctx context.Context, wake <-chan struct{}, interval time.Duration) {
 	tick := time.NewTimer(0)
 	defer tick.Stop()
@@ -78,7 +66,7 @@ func (s *SyncStreamConsumer) Run(ctx context.Context, wake <-chan struct{}, inte
 		case <-tick.C:
 		case <-wake:
 		}
-		// Drain any additional wake signals that queued while we were working.
+		// Discard extra wake signals that arrived during the last pass.
 		for len(wake) > 0 {
 			<-wake
 		}
@@ -89,11 +77,11 @@ func (s *SyncStreamConsumer) Run(ctx context.Context, wake <-chan struct{}, inte
 	}
 }
 
-// runOnce performs a single sync stream pass.
+// runOnce runs one sync pass.
 //
-// The correctness invariant is: publish every event durably to NATS *first*,
-// then advance the Immich cursor via POST /api/sync/ack.  If any publish fails
-// we return an error without acking, so Immich replays the same batch next pass.
+// The consumer publishes every event first, then advances the cursor with
+// POST /api/sync/ack. If a publish fails, runOnce returns an error and does not
+// ack. Immich then sends the same batch again.
 func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 	reqBody, err := json.Marshal(syncStreamRequest{Types: syncRequestTypes})
 	if err != nil {
@@ -120,11 +108,9 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return fmt.Errorf("sync stream returned %d: %s", resp.StatusCode, body)
 	}
 
-	// Read the whole batch first. A malformed line is a hard error: skipping it
-	// and then acking would advance the cursor past a change we never published,
-	// losing it permanently. Failing here leaves the cursor unacked so the batch
-	// replays. (Immich emits valid JSON, so this is an exceptional path; the
-	// nightly full reconcile is the backstop if a line is persistently poisonous.)
+	// A line that does not decode is an error. A skip followed by an ack would
+	// move the cursor past a change that the sidecar did not publish. An error
+	// keeps the cursor and replays the batch.
 	rows, err := parseSyncStream(resp.Body)
 	if err != nil {
 		return fmt.Errorf("parse sync stream: %w", err)
@@ -133,68 +119,59 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return nil
 	}
 
-	// Pass 1: fold this batch's membership deltas into the durable index *before*
-	// resolving albumIds, so an asset upsert reflects post-batch membership. If a
-	// membership update can't be persisted we must not ack, or we'd lose it.
-	for _, row := range rows {
-		switch row.Type {
-		case entityAlbumToAsset:
-			if row.Data.AssetID != "" && row.Data.AlbumID != "" {
-				if err := s.albums.Add(ctx, row.Data.AssetID, row.Data.AlbumID); err != nil {
-					return fmt.Errorf("membership add: %w", err)
-				}
-			}
-		case entityAlbumToAssetDelete:
-			if row.Data.AssetID != "" && row.Data.AlbumID != "" {
-				if err := s.albums.Remove(ctx, row.Data.AssetID, row.Data.AlbumID); err != nil {
-					return fmt.Errorf("membership remove: %w", err)
-				}
-			}
-		}
-	}
-
-	// Pass 2: publish all events.  On the first publish failure, stop and return
-	// without acking so Immich replays the whole batch on the next pass.
+	// Publish every event. Stop and return on the first publish error, without
+	// an ack, so Immich replays the batch.
+	albumCache := map[string][]string{}
 	published := 0
 	for _, row := range rows {
 		ev, ok := syncRowToEvent(row)
 		if !ok {
 			continue
 		}
-		// Enrich asset upserts with the asset's full album set from the index.
 		if ev.Type == events.AssetUpserted {
-			albumIDs, err := s.albums.Albums(ctx, ev.AssetID)
+			albumIDs, err := s.resolveAlbums(ctx, ev.AssetID, albumCache)
 			if err != nil {
 				return fmt.Errorf("resolve albums for %s: %w", ev.AssetID, err)
 			}
 			ev.AlbumIDs = albumIDs
 		}
-		if err := s.publish(ctx, ev); err != nil {
+		if err := s.publisher.Publish(ctx, ev); err != nil {
 			return fmt.Errorf("publish %s: %w", row.Type, err)
 		}
 		published++
 	}
 
-	// Collect the final ack token per entity type. Immich upserts one checkpoint
-	// per type keyed on the leading segment of the ack string, so last-write-wins
-	// across the ordered stream yields the correct resume position for each type.
+	// Send the last ack per entity type. Immich stores one checkpoint per type,
+	// so the last value for each type is the correct resume position.
 	acks := collectAcks(rows)
 	if published > 0 {
 		slog.Info("sync batch published", "events", published, "acks", len(acks))
 	}
-
 	if len(acks) > 0 {
 		if err := s.ack(ctx, acks); err != nil {
-			// Events are already durably published; a failed ack only means the
-			// batch replays next pass, and duplicates are no-ops downstream
-			// (at-least-once). Log and move on rather than fail the pass.
+			// The events are already published. A failed ack replays the batch,
+			// and a duplicate is safe because the downstream is idempotent.
 			slog.Warn("sync ack failed", "err", err)
 		}
 	}
 	return nil
 }
 
-// ack advances the server-side cursor via POST /api/sync/ack.
+// resolveAlbums returns the album IDs for an asset. It caches the result for the
+// current batch so a repeated asset needs only one API call.
+func (s *SyncStreamConsumer) resolveAlbums(ctx context.Context, assetID string, cache map[string][]string) ([]string, error) {
+	if ids, ok := cache[assetID]; ok {
+		return ids, nil
+	}
+	ids, err := s.albums.Albums(ctx, assetID)
+	if err != nil {
+		return nil, err
+	}
+	cache[assetID] = ids
+	return ids, nil
+}
+
+// ack advances the Immich cursor with POST /api/sync/ack.
 func (s *SyncStreamConsumer) ack(ctx context.Context, acks []string) error {
 	body, err := json.Marshal(syncAckSetRequest{Acks: acks})
 	if err != nil {
@@ -220,9 +197,8 @@ func (s *SyncStreamConsumer) ack(ctx context.Context, acks []string) error {
 	return nil
 }
 
-// parseSyncStream reads all JSON-lines from r and returns the decoded rows.
-// A line that fails to decode is a hard error rather than a silent skip, so the
-// caller can refuse to ack and let the batch replay instead of losing the change.
+// parseSyncStream reads all JSON lines from r. A line that does not decode is an
+// error, so the caller can keep the cursor and replay the batch.
 func parseSyncStream(r io.Reader) ([]syncRow, error) {
 	var rows []syncRow
 	scanner := bufio.NewScanner(r)
@@ -241,9 +217,8 @@ func parseSyncStream(r io.Reader) ([]syncRow, error) {
 	return rows, scanner.Err()
 }
 
-// collectAcks returns the final ack string per entity type across the batch.
-// SyncResetV1 acks are dropped: echoing one back to /api/sync/ack would reset the
-// server's sync progress.
+// collectAcks returns the last ack string for each entity type. It drops
+// SyncResetV1 acks. An ack for SyncResetV1 would reset the Immich sync progress.
 func collectAcks(rows []syncRow) []string {
 	byType := make(map[string]string)
 	var order []string
@@ -270,8 +245,6 @@ func collectAcks(rows []syncRow) []string {
 	return acks
 }
 
-// sync stream wire types -------------------------------------------------------
-
 // Immich entity (response) type names.
 const (
 	entityAssetV2            = "AssetV2"
@@ -284,54 +257,47 @@ const (
 	entitySyncReset          = "SyncResetV1"
 )
 
-// syncStreamRequest is the JSON body sent to POST /api/sync/stream (SyncStreamDto).
+// syncStreamRequest is the body for POST /api/sync/stream (SyncStreamDto).
 type syncStreamRequest struct {
 	Types []string `json:"types"`
 	Reset bool     `json:"reset,omitempty"`
 }
 
-// syncAckSetRequest is the JSON body sent to POST /api/sync/ack (SyncAckSetDto).
+// syncAckSetRequest is the body for POST /api/sync/ack (SyncAckSetDto).
 type syncAckSetRequest struct {
 	Acks []string `json:"acks"`
 }
 
-// syncRow is one JSON line from the sync stream response: {type, data, ack}.
+// syncRow is one JSON line from the sync stream: {type, data, ack}.
 type syncRow struct {
-	// Type is the Immich entity type, e.g. "AssetV2", "AlbumDeleteV1".
+	// Type is the entity type, for example "AssetV2" or "AlbumDeleteV1".
 	Type string `json:"type"`
-	// Ack is the opaque, pipe-delimited resume token for this row
-	// ("<type>|<updateId>|<extraId>"), echoed back to /api/sync/ack.
+	// Ack is the resume token for the row ("<type>|<updateId>|<extraId>").
 	Ack string `json:"ack"`
-	// Data carries the per-type payload; only the fields the sidecar uses are decoded.
+	// Data holds the payload. The consumer decodes only the fields it uses.
 	Data syncData `json:"data"`
 }
 
-// syncData holds the union of payload fields across the entity types we map.
-// Which fields are populated depends on Type.
+// syncData holds the payload fields across the entity types the consumer maps.
+// The set of populated fields depends on Type.
 type syncData struct {
-	// AssetV2 / AlbumV2 identity.
-	ID string `json:"id,omitempty"`
-	// AssetDeleteV1 / AssetExifV1 / AlbumToAsset* asset reference.
-	AssetID string `json:"assetId,omitempty"`
-	// AlbumDeleteV1 / AlbumToAsset* album reference.
-	AlbumID string `json:"albumId,omitempty"`
+	ID      string `json:"id,omitempty"`      // AssetV2, AlbumV2
+	AssetID string `json:"assetId,omitempty"` // AssetDeleteV1, AssetExifV1, AlbumToAsset*
+	AlbumID string `json:"albumId,omitempty"` // AlbumDeleteV1, AlbumToAsset*
 
-	// AssetV2 enrichment; deletedAt distinguishes trash from upsert.
-	DeletedAt *string `json:"deletedAt,omitempty"`
-	OwnerID   string  `json:"ownerId,omitempty"`
-	Checksum  string  `json:"checksum,omitempty"`
-	AssetType string  `json:"type,omitempty"`
+	DeletedAt *string `json:"deletedAt,omitempty"` // AssetV2: set means the asset is in the trash
+	OwnerID   string  `json:"ownerId,omitempty"`   // AssetV2
+	Checksum  string  `json:"checksum,omitempty"`  // AssetV2
+	AssetType string  `json:"type,omitempty"`      // AssetV2
 
-	// AlbumV2 enrichment.
-	Name        string `json:"name,omitempty"`
-	Description string `json:"description,omitempty"`
+	Name        string `json:"name,omitempty"`        // AlbumV2
+	Description string `json:"description,omitempty"` // AlbumV2
 }
 
 func boolPtr(b bool) *bool { return &b }
 
-// syncRowToEvent maps an Immich sync row to a canonical sidecar event.
-// Returns (event, true) if the row type is one downstream cares about.
-// AlbumIDs on asset upserts is filled in by the caller from the membership index.
+// syncRowToEvent maps a sync row to an event. It returns (event, true) for a row
+// type the downstream uses. The caller fills AlbumIDs on an asset upsert.
 func syncRowToEvent(row syncRow) (events.Event, bool) {
 	switch row.Type {
 	case entityAssetV2:
@@ -346,11 +312,8 @@ func syncRowToEvent(row syncRow) (events.Event, bool) {
 			AssetType: row.Data.AssetType,
 		}, true
 	case entityAssetExif:
-		// A metadata-only edit still changes what the gallery renders.
-		return events.Event{
-			Type:    events.AssetUpserted,
-			AssetID: row.Data.AssetID,
-		}, true
+		// A metadata edit changes what the gallery shows.
+		return events.Event{Type: events.AssetUpserted, AssetID: row.Data.AssetID}, true
 	case entityAssetDelete:
 		return events.Event{Type: events.AssetDeleted, AssetID: row.Data.AssetID}, true
 	case entityAlbumV2:
@@ -377,8 +340,8 @@ func syncRowToEvent(row syncRow) (events.Event, bool) {
 			Present: boolPtr(false),
 		}, true
 	default:
-		// AssetExifV1 handled above; AlbumUserV1, SyncAckV1, SyncCompleteV1,
-		// SyncResetV1, etc. are not published (but their acks still advance the cursor).
+		// AlbumUserV1, SyncAckV1, SyncCompleteV1, and SyncResetV1 are not
+		// published. Their acks still advance the cursor.
 		return events.Event{}, false
 	}
 }
