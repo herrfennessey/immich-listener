@@ -56,16 +56,21 @@ func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]s
 }
 
 func TestSyncStreamConsumer_RunOnce(t *testing.T) {
+	// Fixtures match the real Immich wire format:
+	//   entity rows:  { "type": "...", "ids": [...], "data": {...} }
+	//   SyncAckV1:    { "type": "SyncAckV1", "ids": ["<token>", "COMPLETE_ID"] }
+	//   SyncCompleteV1: { "type": "SyncCompleteV1" }
 	rows := []any{
-		syncRow{Type: "AssetV2", Data: syncData{ID: "asset-1"}},
-		syncRow{Type: "AssetV2", Data: syncData{ID: "asset-trashed", IsTrashed: true}},
-		syncRow{Type: "AssetDeleteV1", Data: syncData{ID: "asset-2"}},
-		syncRow{Type: "AlbumV2", Data: syncData{ID: "album-1"}},
-		syncRow{Type: "AlbumDeleteV1", Data: syncData{ID: "album-2"}},
+		syncRow{Type: "AssetV2", IDs: []string{"asset-1"}, Data: syncData{ID: "asset-1"}},
+		syncRow{Type: "AssetV2", IDs: []string{"asset-trashed"}, Data: syncData{ID: "asset-trashed", IsTrashed: true}},
+		syncRow{Type: "AssetDeleteV1", IDs: []string{"asset-2"}, Data: syncData{ID: "asset-2"}},
+		syncRow{Type: "AlbumV2", IDs: []string{"album-1"}, Data: syncData{ID: "album-1"}},
+		syncRow{Type: "AlbumDeleteV1", IDs: []string{"album-2"}, Data: syncData{ID: "album-2"}},
 		syncRow{Type: "AlbumToAssetV1", Data: syncData{AlbumID: "album-3", AssetID: "asset-3"}},
 		syncRow{Type: "AlbumToAssetDeleteV1", Data: syncData{AlbumID: "album-4", AssetID: "asset-4"}},
-		syncRow{Type: "AssetExifV1", Data: syncData{ID: "asset-5"}}, // subscribed but not published
-		syncRow{Checkpoint: "tok-abc"},
+		syncRow{Type: "AssetExifV1", IDs: []string{"asset-5"}, Data: syncData{ID: "asset-5"}}, // subscribed but not published
+		syncRow{Type: "SyncAckV1", IDs: []string{"tok-abc"}},
+		syncRow{Type: "SyncCompleteV1"},
 	}
 
 	srv, acks := streamAndAckServer(t, makeStreamBody(rows))
@@ -113,8 +118,8 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 	if len(*acks) != 1 {
 		t.Fatalf("ack called %d times, want 1", len(*acks))
 	}
-	if len((*acks)[0].Checkpoints) != 1 || (*acks)[0].Checkpoints[0].Checkpoint != "tok-abc" {
-		t.Errorf("ack payload = %+v, want checkpoint tok-abc", (*acks)[0])
+	if len((*acks)[0].Acks) != 1 || (*acks)[0].Acks[0] != "tok-abc" {
+		t.Errorf("ack payload = %+v, want acks=[tok-abc]", (*acks)[0])
 	}
 }
 
@@ -139,23 +144,35 @@ func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	if len(receivedTypes) == 0 {
 		t.Fatal("no types sent in sync stream request")
 	}
+	// Verify request uses SyncRequestType values (plural), not SyncEntityType values.
 	wantTypes := map[string]bool{
-		"AssetV2": true, "AssetDeleteV1": true,
-		"AlbumV2": true, "AlbumDeleteV1": true,
-		"AlbumToAssetV1": true, "AlbumToAssetDeleteV1": true,
+		"AssetsV2":        true,
+		"AssetExifsV1":    true,
+		"AlbumsV2":        true,
+		"AlbumToAssetsV1": true,
 	}
 	for _, typ := range receivedTypes {
 		delete(wantTypes, typ)
 	}
 	for missing := range wantTypes {
-		t.Errorf("missing required type in request: %s", missing)
+		t.Errorf("missing required SyncRequestType in request: %s", missing)
+	}
+	// Entity types (singular) must NOT appear in the request body.
+	badTypes := []string{"AssetV2", "AlbumV2", "AssetDeleteV1", "AlbumDeleteV1", "AlbumToAssetV1", "AlbumToAssetDeleteV1"}
+	for _, typ := range receivedTypes {
+		for _, bad := range badTypes {
+			if typ == bad {
+				t.Errorf("request must not contain SyncEntityType %q (use SyncRequestType instead)", typ)
+			}
+		}
 	}
 }
 
 func TestSyncStreamConsumer_PublishFailPreventsAck(t *testing.T) {
 	rows := []any{
-		syncRow{Type: "AssetV2", Data: syncData{ID: "a1"}},
-		syncRow{Checkpoint: "tok-xyz"},
+		syncRow{Type: "AssetV2", IDs: []string{"a1"}, Data: syncData{ID: "a1"}},
+		syncRow{Type: "SyncAckV1", IDs: []string{"tok-xyz"}},
+		syncRow{Type: "SyncCompleteV1"},
 	}
 	srv, acks := streamAndAckServer(t, makeStreamBody(rows))
 	defer srv.Close()
@@ -221,7 +238,7 @@ func TestSyncStreamConsumer_HTTPError(t *testing.T) {
 }
 
 func TestSyncStreamConsumer_InvalidJSON(t *testing.T) {
-	body := "not-json\n" + `{"type":"AssetV2","data":{"id":"a1"}}` + "\n"
+	body := "not-json\n" + `{"type":"AssetV2","ids":["a1"],"data":{"id":"a1"}}` + "\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(body))

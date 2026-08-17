@@ -15,17 +15,23 @@ import (
 	"github.com/herrfennessey/immich-listener/internal/events"
 )
 
-// syncDeltaTypes is the set of delta types the sidecar subscribes to.
-// Immich will only stream rows of these types; others are silently skipped server-side.
-var syncDeltaTypes = []string{
-	"AssetV2",
-	"AssetDeleteV1",
-	"AlbumV2",
-	"AlbumDeleteV1",
-	"AlbumToAssetV1",
-	"AlbumToAssetDeleteV1",
-	"AssetExifV1", // subscribed but ignored by the mapper; required by Immich to advance cursor
+// syncRequestTypes is the set of SyncRequestType values sent in the /api/sync/stream
+// request body.  These are the *request* types (plural form), not the response entity
+// types.  Delete rows (AssetDeleteV1, AlbumDeleteV1, etc.) arrive as entity rows within
+// their parent request stream (e.g. AssetsV2 yields both AssetV2 and AssetDeleteV1 rows),
+// so there is no separate "DeleteV1" request type.
+var syncRequestTypes = []string{
+	"AssetsV2",
+	"AssetExifsV1",
+	"AlbumsV2",
+	"AlbumToAssetsV1",
 }
+
+// Immich sync stream meta-row types (not entity data, never published to NATS).
+const (
+	syncTypeAck      = "SyncAckV1"
+	syncTypeComplete = "SyncCompleteV1"
+)
 
 // SyncStreamConsumer reads from POST /api/sync/stream, converts deltas to Events,
 // publishes them to NATS JetStream, and only then calls POST /api/sync/ack to advance
@@ -79,7 +85,7 @@ func (s *SyncStreamConsumer) Run(ctx context.Context, wake <-chan struct{}, inte
 // If any publish fails we return an error without acking, so Immich replays
 // the same batch on the next pass.
 func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
-	reqBody, err := json.Marshal(syncRequest{Types: syncDeltaTypes})
+	reqBody, err := json.Marshal(syncRequest{Types: syncRequestTypes})
 	if err != nil {
 		return err
 	}
@@ -113,12 +119,12 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return nil
 	}
 
-	// Collect the ack token — it's the last row with a non-empty Checkpoint field.
-	var ackToken string
-	for i := len(rows) - 1; i >= 0; i-- {
-		if rows[i].Checkpoint != "" {
-			ackToken = rows[i].Checkpoint
-			break
+	// Collect ack tokens from SyncAckV1 rows.  Each SyncAckV1 row carries its
+	// token(s) in the ids field (not in data).  We ack all tokens at the end.
+	var ackTokens []string
+	for _, row := range rows {
+		if row.Type == syncTypeAck {
+			ackTokens = append(ackTokens, row.IDs...)
 		}
 	}
 
@@ -129,8 +135,9 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 	// error without acking Immich; the next pass will replay the whole batch.
 	eventsPublished := 0
 	for _, row := range rows {
-		if row.Checkpoint != "" {
-			continue // metadata row
+		// Skip Immich meta-rows (SyncAckV1, SyncCompleteV1, etc.).
+		if row.Type == syncTypeAck || row.Type == syncTypeComplete {
+			continue
 		}
 		ev, ok := syncRowToEvent(row, assetAlbums)
 		if !ok {
@@ -147,8 +154,8 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 	}
 
 	// Only advance the server-side cursor after all events are durably on the bus.
-	if ackToken != "" {
-		if err := s.ack(ctx, ackToken); err != nil {
+	if len(ackTokens) > 0 {
+		if err := s.ack(ctx, ackTokens); err != nil {
 			// Log but do not return: events are already published; best effort to
 			// advance the cursor. The worst case is a duplicate batch on the next pass,
 			// which downstream consumers must tolerate (at-least-once semantics).
@@ -159,8 +166,9 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 }
 
 // ack calls POST /api/sync/ack to advance the server-side cursor.
-func (s *SyncStreamConsumer) ack(ctx context.Context, checkpoint string) error {
-	body, err := json.Marshal(syncAckRequest{Checkpoints: []syncCheckpoint{{Type: "v1", Checkpoint: checkpoint}}})
+// tokens is the list of ack tokens collected from SyncAckV1 rows.
+func (s *SyncStreamConsumer) ack(ctx context.Context, tokens []string) error {
+	body, err := json.Marshal(syncAckRequest{Acks: tokens})
 	if err != nil {
 		return err
 	}
@@ -226,22 +234,20 @@ type syncRequest struct {
 	Types []string `json:"types"`
 }
 
-// syncAckRequest is the JSON body sent to POST /api/sync/ack.
+// syncAckRequest is the JSON body sent to POST /api/sync/ack (SyncAckSetDto).
+// Acks is a list of ack token strings (max 1000) collected from SyncAckV1 rows.
 type syncAckRequest struct {
-	Checkpoints []syncCheckpoint `json:"checkpoints"`
-}
-
-type syncCheckpoint struct {
-	Type       string `json:"type"`
-	Checkpoint string `json:"checkpoint"`
+	Acks []string `json:"acks"`
 }
 
 // syncRow represents one JSON line from the sync stream response.
+// Each line has the shape: { "type": "...", "ids": [...], "data": {...} }
+// SyncAckV1 rows carry ack token(s) in ids; entity rows carry payload in data.
 type syncRow struct {
-	// Checkpoint is set on the final line of a batch (the ack token).
-	Checkpoint string `json:"checkpoint,omitempty"`
-	// Type is the Immich delta type, e.g. "AssetV2", "AlbumDeleteV1".
+	// Type is the Immich entity/meta type, e.g. "AssetV2", "SyncAckV1".
 	Type string `json:"type,omitempty"`
+	// IDs carries ack tokens on SyncAckV1 rows (and identity on some entity rows).
+	IDs []string `json:"ids,omitempty"`
 	// Data carries the per-type payload fields.
 	Data syncData `json:"data,omitempty"`
 }
