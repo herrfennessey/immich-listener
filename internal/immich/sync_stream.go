@@ -10,32 +10,42 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/herrfennessey/immich-listener/internal/events"
 )
 
-// SyncStreamConsumer reads from POST /api/sync/stream, converts deltas to Events,
-// and calls the provided publish function for each one.  The checkpoint is persisted
-// to disk between calls so restarts continue from where they left off.
-type SyncStreamConsumer struct {
-	baseURL        string
-	apiKey         string
-	checkpointFile string
-	httpClient     *http.Client
-	publish        func(context.Context, events.Event) error
+// syncDeltaTypes is the set of delta types the sidecar subscribes to.
+// Immich will only stream rows of these types; others are silently skipped server-side.
+var syncDeltaTypes = []string{
+	"AssetV2",
+	"AssetDeleteV1",
+	"AlbumV2",
+	"AlbumDeleteV1",
+	"AlbumToAssetV1",
+	"AlbumToAssetDeleteV1",
+	"AssetExifV1", // subscribed but ignored by the mapper; required by Immich to advance cursor
 }
 
-// NewSyncStreamConsumer creates a consumer.  publish is called for every event parsed.
-func NewSyncStreamConsumer(baseURL, apiKey, checkpointFile string, publish func(context.Context, events.Event) error) *SyncStreamConsumer {
+// SyncStreamConsumer reads from POST /api/sync/stream, converts deltas to Events,
+// publishes them to NATS JetStream, and only then calls POST /api/sync/ack to advance
+// the server-side cursor.  If any publish fails the cursor is NOT advanced so that
+// the next pass replays the same batch.
+type SyncStreamConsumer struct {
+	baseURL    string
+	apiKey     string
+	httpClient *http.Client
+	publish    func(context.Context, events.Event) error
+}
+
+// NewSyncStreamConsumer creates a consumer.  publish is called for every event parsed
+// and must confirm durable delivery (e.g. NATS JetStream ack) before returning nil.
+func NewSyncStreamConsumer(baseURL, apiKey string, publish func(context.Context, events.Event) error) *SyncStreamConsumer {
 	return &SyncStreamConsumer{
-		baseURL:        baseURL,
-		apiKey:         apiKey,
-		checkpointFile: checkpointFile,
-		httpClient:     &http.Client{Timeout: 5 * time.Minute},
-		publish:        publish,
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		httpClient: &http.Client{Timeout: 5 * time.Minute},
+		publish:    publish,
 	}
 }
 
@@ -51,6 +61,10 @@ func (s *SyncStreamConsumer) Run(ctx context.Context, wake <-chan struct{}, inte
 		case <-tick.C:
 		case <-wake:
 		}
+		// Drain any additional wake signals that queued while we were working.
+		for len(wake) > 0 {
+			<-wake
+		}
 		if err := s.runOnce(ctx); err != nil {
 			slog.Warn("sync stream error", "err", err)
 		}
@@ -59,13 +73,13 @@ func (s *SyncStreamConsumer) Run(ctx context.Context, wake <-chan struct{}, inte
 }
 
 // runOnce performs a single sync stream pass.
+//
+// The correctness invariant is: publish every event durably to NATS *first*,
+// then advance the Immich server-side cursor via POST /api/sync/ack.
+// If any publish fails we return an error without acking, so Immich replays
+// the same batch on the next pass.
 func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
-	checkpoint, err := s.loadCheckpoint()
-	if err != nil {
-		return fmt.Errorf("load checkpoint: %w", err)
-	}
-
-	reqBody, err := json.Marshal(syncRequest{Checkpoint: checkpoint})
+	reqBody, err := json.Marshal(syncRequest{Types: syncDeltaTypes})
 	if err != nil {
 		return err
 	}
@@ -90,8 +104,90 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return fmt.Errorf("sync stream returned %d: %s", resp.StatusCode, body)
 	}
 
-	var newCheckpoint string
-	scanner := bufio.NewScanner(resp.Body)
+	// Parse the full batch first so we can resolve albumIds[] for asset events.
+	rows, err := parseSyncStream(resp.Body)
+	if err != nil {
+		return fmt.Errorf("parse sync stream: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	// Collect the ack token — it's the last row with a non-empty Checkpoint field.
+	var ackToken string
+	for i := len(rows) - 1; i >= 0; i-- {
+		if rows[i].Checkpoint != "" {
+			ackToken = rows[i].Checkpoint
+			break
+		}
+	}
+
+	// Build asset→albumIds index from AlbumToAsset deltas in this batch.
+	assetAlbums := buildAssetAlbumsIndex(rows)
+
+	// Publish all events.  On the first publish failure we stop and return the
+	// error without acking Immich; the next pass will replay the whole batch.
+	eventsPublished := 0
+	for _, row := range rows {
+		if row.Checkpoint != "" {
+			continue // metadata row
+		}
+		ev, ok := syncRowToEvent(row, assetAlbums)
+		if !ok {
+			continue
+		}
+		if err := s.publish(ctx, ev); err != nil {
+			return fmt.Errorf("publish %s %s: %w", row.Type, row.Data.ID, err)
+		}
+		eventsPublished++
+	}
+
+	if eventsPublished > 0 {
+		slog.Info("sync batch published", "events", eventsPublished)
+	}
+
+	// Only advance the server-side cursor after all events are durably on the bus.
+	if ackToken != "" {
+		if err := s.ack(ctx, ackToken); err != nil {
+			// Log but do not return: events are already published; best effort to
+			// advance the cursor. The worst case is a duplicate batch on the next pass,
+			// which downstream consumers must tolerate (at-least-once semantics).
+			slog.Warn("sync ack failed", "err", err)
+		}
+	}
+	return nil
+}
+
+// ack calls POST /api/sync/ack to advance the server-side cursor.
+func (s *SyncStreamConsumer) ack(ctx context.Context, checkpoint string) error {
+	body, err := json.Marshal(syncAckRequest{Checkpoints: []syncCheckpoint{{Type: "v1", Checkpoint: checkpoint}}})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		s.baseURL+"/api/sync/ack", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", s.apiKey)
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST /api/sync/ack: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("sync ack returned %d: %s", resp.StatusCode, b)
+	}
+	return nil
+}
+
+// parseSyncStream reads all JSON-lines from r and returns the decoded rows.
+func parseSyncStream(r io.Reader) ([]syncRow, error) {
+	var rows []syncRow
+	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(bytes.TrimSpace(line)) == 0 {
@@ -102,82 +198,51 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 			slog.Warn("sync stream: unparseable line", "line", string(line), "err", err)
 			continue
 		}
-		if row.Checkpoint != "" {
-			newCheckpoint = row.Checkpoint
+		rows = append(rows, row)
+	}
+	return rows, scanner.Err()
+}
+
+// buildAssetAlbumsIndex builds a map of assetId → []albumId from AlbumToAsset rows.
+func buildAssetAlbumsIndex(rows []syncRow) map[string][]string {
+	idx := make(map[string][]string)
+	for _, row := range rows {
+		if row.Type != "AlbumToAssetV1" {
 			continue
 		}
-		ev, ok := syncRowToEvent(row)
-		if !ok {
+		if row.Data.AssetID == "" || row.Data.AlbumID == "" {
 			continue
 		}
-		if err := s.publish(ctx, ev); err != nil {
-			slog.Warn("publish error", "err", err, "type", ev.Type)
-		}
+		idx[row.Data.AssetID] = append(idx[row.Data.AssetID], row.Data.AlbumID)
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan sync stream: %w", err)
-	}
-	if newCheckpoint != "" {
-		if err := s.saveCheckpoint(newCheckpoint); err != nil {
-			slog.Warn("save checkpoint", "err", err)
-		}
-	}
-	return nil
-}
-
-// checkpoint persistence -------------------------------------------------------
-
-type checkpointFile struct {
-	Checkpoint string `json:"checkpoint"`
-}
-
-func (s *SyncStreamConsumer) loadCheckpoint() (string, error) {
-	data, err := os.ReadFile(s.checkpointFile)
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	var cf checkpointFile
-	if err := json.Unmarshal(data, &cf); err != nil {
-		return "", err
-	}
-	return cf.Checkpoint, nil
-}
-
-func (s *SyncStreamConsumer) saveCheckpoint(cp string) error {
-	data, err := json.Marshal(checkpointFile{Checkpoint: cp})
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.checkpointFile), 0o700); err != nil {
-		return err
-	}
-	tmp := s.checkpointFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.checkpointFile)
+	return idx
 }
 
 // sync stream wire types -------------------------------------------------------
 
 // syncRequest is the JSON body sent to POST /api/sync/stream.
 type syncRequest struct {
-	// Checkpoint is the opaque token from the previous response; empty on first call.
-	Checkpoint string `json:"checkpoint,omitempty"`
+	// Types is the list of delta types to subscribe to.
+	Types []string `json:"types"`
+}
+
+// syncAckRequest is the JSON body sent to POST /api/sync/ack.
+type syncAckRequest struct {
+	Checkpoints []syncCheckpoint `json:"checkpoints"`
+}
+
+type syncCheckpoint struct {
+	Type       string `json:"type"`
+	Checkpoint string `json:"checkpoint"`
 }
 
 // syncRow represents one JSON line from the sync stream response.
-// Only the fields the sidecar cares about are decoded.
 type syncRow struct {
-	// Checkpoint is set on the last line of a batch.
+	// Checkpoint is set on the final line of a batch (the ack token).
 	Checkpoint string `json:"checkpoint,omitempty"`
 	// Type is the Immich delta type, e.g. "AssetV2", "AlbumDeleteV1".
 	Type string `json:"type,omitempty"`
-
-	// AssetID / AlbumID appear in the data object for each respective type.
+	// Data carries the per-type payload fields.
 	Data syncData `json:"data,omitempty"`
 }
 
@@ -185,36 +250,43 @@ type syncData struct {
 	ID      string `json:"id,omitempty"`
 	AlbumID string `json:"albumId,omitempty"`
 	AssetID string `json:"assetId,omitempty"`
+	// IsTrashed is set on AssetV2 rows when the asset is in the trash.
+	IsTrashed bool `json:"isTrashed,omitempty"`
 }
 
 // syncRowToEvent maps an Immich sync row to a canonical sidecar event.
+// assetAlbums is the asset→albums index built from the same batch.
 // Returns (event, true) if the row type is known and should be published.
-func syncRowToEvent(row syncRow) (events.Event, bool) {
+func syncRowToEvent(row syncRow, assetAlbums map[string][]string) (events.Event, bool) {
 	switch row.Type {
 	case "AssetV2":
-		return events.Event{Type: events.AssetCreated, Source: "sync", AssetID: row.Data.ID}, true
+		if row.Data.IsTrashed {
+			return events.Event{Type: events.AssetTrashed, AssetID: row.Data.ID}, true
+		}
+		albumIDs := assetAlbums[row.Data.ID]
+		return events.Event{Type: events.AssetUpserted, AssetID: row.Data.ID, AlbumIDs: albumIDs}, true
 	case "AssetDeleteV1":
-		return events.Event{Type: events.AssetDeleted, Source: "sync", AssetID: row.Data.ID}, true
+		return events.Event{Type: events.AssetDeleted, AssetID: row.Data.ID}, true
 	case "AlbumV2":
-		return events.Event{Type: events.AlbumUpdated, Source: "sync", AlbumID: row.Data.ID}, true
+		return events.Event{Type: events.AlbumChanged, AlbumID: row.Data.ID}, true
 	case "AlbumDeleteV1":
-		return events.Event{Type: events.AlbumDeleted, Source: "sync", AlbumID: row.Data.ID}, true
+		return events.Event{Type: events.AlbumDeleted, AlbumID: row.Data.ID}, true
 	case "AlbumToAssetV1":
 		return events.Event{
-			Type:    events.AlbumAssetAdded,
-			Source:  "sync",
+			Type:    events.AlbumMembership,
 			AlbumID: row.Data.AlbumID,
 			AssetID: row.Data.AssetID,
 		}, true
 	case "AlbumToAssetDeleteV1":
 		return events.Event{
-			Type:    events.AlbumAssetRemoved,
-			Source:  "sync",
+			Type:    events.AlbumMembership,
 			AlbumID: row.Data.AlbumID,
 			AssetID: row.Data.AssetID,
+			Removed: true,
 		}, true
 	default:
-		// AssetExifV1, AlbumUserV1, etc. — not interesting to downstream consumers.
+		// AssetExifV1, AlbumUserV1, etc. — subscribed for cursor advancement but
+		// not interesting to downstream consumers.
 		return events.Event{}, false
 	}
 }

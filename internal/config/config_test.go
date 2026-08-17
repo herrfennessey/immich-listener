@@ -20,7 +20,6 @@ func TestLoad_Defaults(t *testing.T) {
 	os.Unsetenv("NATS_URL")
 	os.Unsetenv("NATS_STREAM_NAME")
 	os.Unsetenv("NATS_SUBJECT_PREFIX")
-	os.Unsetenv("CHECKPOINT_FILE")
 	os.Unsetenv("SYNC_INTERVAL")
 	os.Unsetenv("SOCKETIO_ENABLED")
 

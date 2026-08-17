@@ -1,8 +1,10 @@
 // Command sidecar is the Immich event-to-NATS bridge.
 //
-// It connects to the Immich Socket.IO gateway for low-latency event delivery
-// and continuously polls /api/sync/stream for durable, checkpointed delivery.
-// All events are published to a NATS JetStream stream as JSON.
+// It connects to the Immich Socket.IO gateway as a low-latency doorbell and
+// continuously polls /api/sync/stream for durable, checkpointed delivery.
+// All events are published to a NATS JetStream stream as JSON, and the
+// server-side Immich cursor is only advanced after each batch is durably on
+// the bus.
 //
 // Configuration is entirely via environment variables; see internal/config.
 package main
@@ -49,12 +51,10 @@ func main() {
 	// into running immediately rather than waiting for the next tick.
 	wake := make(chan struct{}, 1)
 
-	sync := immichpkg.NewSyncStreamConsumer(
-		cfg.ImmichBaseURL, cfg.ImmichAPIKey, cfg.CheckpointFile, publish)
+	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, cfg.ImmichAPIKey, publish)
 
 	if cfg.SocketIOEnabled {
-		socketListener := immichpkg.NewSocketListener(
-			cfg.ImmichBaseURL, cfg.ImmichAPIKey, wake, publish)
+		socketListener := immichpkg.NewSocketListener(cfg.ImmichBaseURL, cfg.ImmichAPIKey, wake)
 		go socketListener.Run(ctx)
 	}
 

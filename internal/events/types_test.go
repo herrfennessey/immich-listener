@@ -4,18 +4,17 @@ import "testing"
 
 func TestEvent_Subject(t *testing.T) {
 	tests := []struct {
-		ev      Event
-		prefix  string
-		want    string
+		ev     Event
+		prefix string
+		want   string
 	}{
-		{Event{Type: AssetCreated}, "immich", "immich.asset.created"},
-		{Event{Type: AssetUpdated}, "immich", "immich.asset.updated"},
+		{Event{Type: AssetUpserted}, "immich", "immich.asset.upserted"},
+		{Event{Type: AssetTrashed}, "immich", "immich.asset.trashed"},
 		{Event{Type: AssetDeleted}, "immich", "immich.asset.deleted"},
-		{Event{Type: AlbumUpdated}, "immich", "immich.album.updated"},
+		{Event{Type: AlbumChanged}, "immich", "immich.album.changed"},
 		{Event{Type: AlbumDeleted}, "immich", "immich.album.deleted"},
-		{Event{Type: AlbumAssetAdded}, "immich", "immich.album.asset.added"},
-		{Event{Type: AlbumAssetRemoved}, "immich", "immich.album.asset.removed"},
-		{Event{Type: AssetCreated}, "home", "home.asset.created"},
+		{Event{Type: AlbumMembership}, "immich", "immich.album.membership"},
+		{Event{Type: AssetUpserted}, "home", "home.asset.upserted"},
 	}
 	for _, tt := range tests {
 		got := tt.ev.Subject(tt.prefix)

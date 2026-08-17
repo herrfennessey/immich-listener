@@ -22,10 +22,8 @@ type Config struct {
 	// NATSSubjectPrefix is prepended to every published subject, defaults to "immich".
 	NATSSubjectPrefix string
 
-	// CheckpointFile is the path to the file where the sync stream checkpoint is persisted.
-	CheckpointFile string
-
 	// SyncInterval is how long the sidecar waits between sync stream passes when idle.
+	// The spec calls for a 10-minute backstop; the default here is 30s.
 	SyncInterval time.Duration
 
 	// SocketIOEnabled controls whether the Socket.IO real-time listener is started.
@@ -40,7 +38,6 @@ func Load() (*Config, error) {
 		NATSUrl:           getEnv("NATS_URL", "nats://localhost:4222"),
 		NATSStreamName:    getEnv("NATS_STREAM_NAME", "IMMICH"),
 		NATSSubjectPrefix: getEnv("NATS_SUBJECT_PREFIX", "immich"),
-		CheckpointFile:    getEnv("CHECKPOINT_FILE", "/data/checkpoint.json"),
 		SyncInterval:      parseDuration(os.Getenv("SYNC_INTERVAL"), 30*time.Second),
 		SocketIOEnabled:   parseBool(os.Getenv("SOCKETIO_ENABLED"), true),
 	}

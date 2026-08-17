@@ -10,31 +10,27 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/herrfennessey/immich-listener/internal/events"
 )
 
-// SocketListener connects to the Immich Socket.IO gateway, decodes lifecycle
-// events, and calls publish for each recognised event.  The connection is
-// automatically re-established on error.
+// SocketListener connects to the Immich Socket.IO gateway and acts as a
+// doorbell: any recognised lifecycle event signals the sync-stream consumer
+// to run immediately rather than waiting for the next tick.
 //
-// Architecture note: Socket.IO events are fast but lossy.  The listener only
-// publishes them as a low-latency complement to the reliable sync stream.  When
-// a socket event arrives it also signals wake to trigger an immediate sync-stream
-// pass so any gaps are filled.
+// The sidecar is deliberately dumb on the socket path — event contents are
+// ignored.  All bus messages are produced exclusively by the sync stream
+// (publish-then-ack) so there is no double-publishing and no ID mismatch.
 type SocketListener struct {
 	baseURL string
 	apiKey  string
-	publish func(context.Context, events.Event) error
 	wake    chan<- struct{}
 }
 
-// NewSocketListener creates a listener.  wake is sent to whenever any socket
-// event arrives so the sync-stream consumer can run immediately.
-func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}, publish func(context.Context, events.Event) error) *SocketListener {
+// NewSocketListener creates a listener.  wake is sent to whenever a known
+// Immich lifecycle event arrives.
+func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}) *SocketListener {
 	return &SocketListener{
 		baseURL: baseURL,
 		apiKey:  apiKey,
-		publish: publish,
 		wake:    wake,
 	}
 }
@@ -111,12 +107,11 @@ func (l *SocketListener) handleFrame(ctx context.Context, conn *websocket.Conn, 
 	switch eioType {
 	case '0': // open — server hello, reply with Socket.IO connect
 		slog.Debug("engine.io open", "data", payload)
-		// Send Socket.IO namespace connect packet.
 		return conn.Write(ctx, websocket.MessageText, []byte("40"))
 	case '2': // ping — respond with pong
 		return conn.Write(ctx, websocket.MessageText, []byte("3"))
 	case '4': // message
-		return l.handleSocketIOMessage(ctx, payload)
+		return l.handleSocketIOMessage(payload)
 	default:
 		return nil
 	}
@@ -124,7 +119,7 @@ func (l *SocketListener) handleFrame(ctx context.Context, conn *websocket.Conn, 
 
 // handleSocketIOMessage processes a Socket.IO packet (Engine.IO type 4).
 // Socket.IO packet type is the first byte of payload.
-func (l *SocketListener) handleSocketIOMessage(ctx context.Context, payload string) error {
+func (l *SocketListener) handleSocketIOMessage(payload string) error {
 	if len(payload) == 0 {
 		return nil
 	}
@@ -155,58 +150,30 @@ func (l *SocketListener) handleSocketIOMessage(ctx context.Context, payload stri
 		return nil
 	}
 
-	var arg json.RawMessage
-	if len(parts) > 1 {
-		arg = parts[1]
-	}
-
-	return l.dispatchSocketEvent(ctx, name, arg)
+	return l.dispatchSocketEvent(name)
 }
 
-// dispatchSocketEvent maps an Immich socket event name to a canonical event.
-func (l *SocketListener) dispatchSocketEvent(ctx context.Context, name string, arg json.RawMessage) error {
-	var ev events.Event
-	switch name {
-	case "on_upload_success":
-		id := extractID(arg)
-		ev = events.Event{Type: events.AssetCreated, Source: "socket", AssetID: id}
-	case "on_asset_update":
-		id := extractID(arg)
-		ev = events.Event{Type: events.AssetUpdated, Source: "socket", AssetID: id}
-	case "on_asset_delete", "on_asset_trash":
-		id := extractID(arg)
-		ev = events.Event{Type: events.AssetDeleted, Source: "socket", AssetID: id}
-	case "on_asset_restore":
-		id := extractID(arg)
-		ev = events.Event{Type: events.AssetCreated, Source: "socket", AssetID: id}
-	case "on_album_update":
-		id := extractID(arg)
-		ev = events.Event{Type: events.AlbumUpdated, Source: "socket", AlbumID: id}
-	default:
+// knownSocketEvents is the set of Immich lifecycle event names that should
+// trigger a sync-stream pass.
+var knownSocketEvents = map[string]bool{
+	"on_upload_success": true,
+	"on_asset_update":   true,
+	"on_asset_delete":   true,
+	"on_asset_trash":    true,
+	"on_asset_restore":  true,
+	"on_album_update":   true,
+}
+
+// dispatchSocketEvent signals the sync-stream consumer if the event name is known.
+func (l *SocketListener) dispatchSocketEvent(name string) error {
+	if !knownSocketEvents[name] {
 		slog.Debug("socket.io: ignoring unknown event", "name", name)
 		return nil
 	}
-
-	// Trigger an immediate sync-stream pass for every known event.
+	slog.Debug("socket.io: doorbell", "name", name)
 	select {
 	case l.wake <- struct{}{}:
 	default:
 	}
-
-	if err := l.publish(ctx, ev); err != nil {
-		slog.Warn("publish socket event", "name", name, "err", err)
-	}
 	return nil
-}
-
-// extractID tries to read an "id" field from a JSON object argument.
-func extractID(raw json.RawMessage) string {
-	if raw == nil {
-		return ""
-	}
-	var obj struct {
-		ID string `json:"id"`
-	}
-	_ = json.Unmarshal(raw, &obj)
-	return obj.ID
 }

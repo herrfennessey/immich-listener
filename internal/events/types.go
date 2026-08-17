@@ -5,16 +5,19 @@ package events
 type Type string
 
 const (
-	// Asset events sourced from sync stream and Socket.IO.
-	AssetCreated Type = "asset.created"
-	AssetUpdated Type = "asset.updated"
+	// AssetUpserted covers asset create and update (AssetV2 from sync stream).
+	AssetUpserted Type = "asset.upserted"
+	// AssetTrashed is emitted when an asset is moved to the Immich trash.
+	AssetTrashed Type = "asset.trashed"
+	// AssetDeleted is emitted when an asset is permanently deleted (AssetDeleteV1).
 	AssetDeleted Type = "asset.deleted"
 
-	// Album events sourced from sync stream.
-	AlbumUpdated          Type = "album.updated"
-	AlbumDeleted          Type = "album.deleted"
-	AlbumAssetAdded       Type = "album.asset.added"
-	AlbumAssetRemoved     Type = "album.asset.removed"
+	// AlbumChanged covers album metadata create/update (AlbumV2).
+	AlbumChanged Type = "album.changed"
+	// AlbumDeleted is emitted when an album is permanently deleted (AlbumDeleteV1).
+	AlbumDeleted Type = "album.deleted"
+	// AlbumMembership is emitted when assets are added to or removed from an album.
+	AlbumMembership Type = "album.membership"
 )
 
 // Event is the envelope published on every NATS subject.
@@ -23,16 +26,19 @@ const (
 type Event struct {
 	// Type identifies the kind of change.
 	Type Type `json:"type"`
-	// Source indicates where the event originated: "socket" or "sync".
-	Source string `json:"source"`
 	// AssetID is set for asset events.
 	AssetID string `json:"assetId,omitempty"`
-	// AlbumID is set for album events.
+	// AlbumID is set for album events and for AlbumMembership events.
 	AlbumID string `json:"albumId,omitempty"`
+	// AlbumIDs is the full list of albums the asset belongs to, resolved from
+	// the AlbumToAsset deltas seen in the same sync batch.  Set on AssetUpserted.
+	AlbumIDs []string `json:"albumIds,omitempty"`
+	// Removed is true for AlbumMembership events that represent a removal.
+	Removed bool `json:"removed,omitempty"`
 }
 
 // Subject returns the NATS subject for this event, given the configured prefix.
-// Example: prefix="immich", Type=AssetCreated → "immich.asset.created"
+// Example: prefix="immich", Type=AssetUpserted → "immich.asset.upserted"
 func (e Event) Subject(prefix string) string {
 	return prefix + "." + string(e.Type)
 }
