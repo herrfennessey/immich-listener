@@ -25,17 +25,24 @@ The subject prefix (`immich`) is configurable via `NATS_SUBJECT_PREFIX`.
 
 ### Event envelope
 
+Asset upserted example (fields not relevant to the event type are omitted):
 ```json
 {
   "type":     "asset.upserted",
   "assetId":  "...",
-  "albumIds": ["...", "..."],
-  "albumId":  "",
-  "removed":  false
+  "albumIds": ["...", "..."]
 }
 ```
 
-Fields not relevant to an event type are omitted.
+Album membership removal example:
+```json
+{
+  "type":    "album.membership",
+  "albumId": "...",
+  "assetId": "...",
+  "removed": true
+}
+```
 
 ## Running with Docker Compose
 
