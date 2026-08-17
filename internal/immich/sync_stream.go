@@ -95,7 +95,7 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/jsonlines+json")
-	req.Header.Set("x-api-key", s.apiKey)
+	req.Header.Set("x-immich-session-token", s.apiKey)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -186,7 +186,7 @@ func (s *SyncStreamConsumer) ack(ctx context.Context, acks []string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", s.apiKey)
+	req.Header.Set("x-immich-session-token", s.apiKey)
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

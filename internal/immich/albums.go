@@ -38,7 +38,7 @@ func (c *AlbumClient) Albums(ctx context.Context, assetID string) ([]string, err
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("x-immich-session-token", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

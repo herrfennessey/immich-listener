@@ -66,7 +66,7 @@ func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]s
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/sync/stream":
-			if r.Header.Get("x-api-key") != "test-key" {
+			if r.Header.Get("x-immich-session-token") != "test-key" {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}

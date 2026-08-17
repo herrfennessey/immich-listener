@@ -16,7 +16,7 @@ func TestAlbumClient_Albums(t *testing.T) {
 			return
 		}
 		gotAssetID = r.URL.Query().Get("assetId")
-		gotAPIKey = r.Header.Get("x-api-key")
+		gotAPIKey = r.Header.Get("x-immich-session-token")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"album-1","albumName":"Trip"},{"id":"album-2","albumName":"Pets"}]`))
 	}))
@@ -34,7 +34,7 @@ func TestAlbumClient_Albums(t *testing.T) {
 		t.Errorf("assetId query = %q, want asset-9", gotAssetID)
 	}
 	if gotAPIKey != "test-key" {
-		t.Errorf("x-api-key = %q, want test-key", gotAPIKey)
+		t.Errorf("x-immich-session-token = %q, want test-key", gotAPIKey)
 	}
 	if len(ids) != 2 || ids[0] != "album-1" || ids[1] != "album-2" {
 		t.Errorf("ids = %v, want [album-1 album-2]", ids)
