@@ -14,6 +14,23 @@ func TestLoad_MissingAPIKey(t *testing.T) {
 	}
 }
 
+func TestLoad_EmptyAPIKey(t *testing.T) {
+	t.Setenv("IMMICH_API_KEY", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when IMMICH_API_KEY is set but empty")
+	}
+}
+
+func TestLoad_NonPositiveSyncInterval(t *testing.T) {
+	t.Setenv("IMMICH_API_KEY", "test-key")
+	for _, v := range []string{"0s", "-5s"} {
+		t.Setenv("SYNC_INTERVAL", v)
+		if _, err := Load(); err == nil {
+			t.Errorf("expected error for SYNC_INTERVAL=%q", v)
+		}
+	}
+}
+
 func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("IMMICH_API_KEY", "test-key")
 	os.Unsetenv("IMMICH_BASE_URL")

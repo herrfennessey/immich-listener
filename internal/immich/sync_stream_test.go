@@ -107,7 +107,10 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 
 	pub := &capturePublisher{}
 	// The resolver returns the asset's full album set, independent of the batch.
-	albums := fakeAlbums{m: map[string][]string{"asset-1": {"album-x", "album-y"}}}
+	albums := fakeAlbums{m: map[string][]string{
+		"asset-1":       {"album-x", "album-y"},
+		"asset-trashed": {"album-z"},
+	}}
 	consumer := NewSyncStreamConsumer(srv.URL, "test-key", pub, albums)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -142,6 +145,11 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 	}
 	if up.OwnerID != "owner-1" || up.Checksum != "chk" || up.AssetType != "IMAGE" {
 		t.Errorf("asset-1 enrichment = %+v", up)
+	}
+
+	// A trash event also carries the asset's albums.
+	if strings.Join(pub.events[1].AlbumIDs, ",") != "album-z" {
+		t.Errorf("asset-trashed AlbumIDs = %v, want [album-z]", pub.events[1].AlbumIDs)
 	}
 
 	// Delete events carry the id from the correct per-type data field.

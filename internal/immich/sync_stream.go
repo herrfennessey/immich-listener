@@ -128,7 +128,10 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		if !ok {
 			continue
 		}
-		if ev.Type == events.AssetUpserted {
+		// An upsert or a trash needs the asset's albums so a downstream knows
+		// which album manifests to update or clear. The asset still exists in
+		// both cases. A permanent delete cannot be resolved and carries no albums.
+		if ev.Type == events.AssetUpserted || ev.Type == events.AssetTrashed {
 			albumIDs, err := s.resolveAlbums(ctx, ev.AssetID, albumCache)
 			if err != nil {
 				return fmt.Errorf("resolve albums for %s: %w", ev.AssetID, err)

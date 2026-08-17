@@ -35,32 +35,31 @@ func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}) *SocketList
 }
 
 // Run connects to the Socket.IO endpoint until ctx ends. After an error, Run
-// reconnects with exponential back-off.
+// reconnects with exponential back-off. A successful connection resets the
+// back-off, so a session that stayed up for a long time reconnects fast.
 func (l *SocketListener) Run(ctx context.Context) {
 	backoff := time.Second
 	for {
-		if err := l.connect(ctx); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			slog.Warn("socket.io disconnected, reconnecting", "err", err, "backoff", backoff)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			if backoff < 60*time.Second {
-				backoff *= 2
-			}
-			continue
+		err := l.connect(ctx, func() { backoff = time.Second })
+		if ctx.Err() != nil {
+			return
 		}
-		backoff = time.Second
+		slog.Warn("socket.io disconnected, reconnecting", "err", err, "backoff", backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 60*time.Second {
+			backoff *= 2
+		}
 	}
 }
 
 // connect opens one WebSocket session. connect returns when the connection
-// closes or when ctx ends.
-func (l *SocketListener) connect(ctx context.Context) error {
+// closes or when ctx ends. connect calls onConnect once, after the dial
+// succeeds.
+func (l *SocketListener) connect(ctx context.Context, onConnect func()) error {
 	// Change the URL scheme: http to ws, https to wss.
 	wsURL := l.baseURL
 	if strings.HasPrefix(wsURL, "http://") {
@@ -80,6 +79,7 @@ func (l *SocketListener) connect(ctx context.Context) error {
 	defer conn.CloseNow()
 
 	slog.Info("socket.io connected", "url", wsURL)
+	onConnect()
 
 	// Engine.IO / Socket.IO framing loop.
 	for {

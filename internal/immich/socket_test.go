@@ -51,7 +51,7 @@ func TestHandleFrame_OpenSendsSocketIOConnect(t *testing.T) {
 	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = listener.connect(ctx)
+	_ = listener.connect(ctx, func() {})
 
 	select {
 	case got := <-sentCh:
@@ -81,7 +81,7 @@ func TestHandleFrame_PingRepliedWithPong(t *testing.T) {
 	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = listener.connect(ctx)
+	_ = listener.connect(ctx, func() {})
 
 	select {
 	case got := <-responseCh:
@@ -113,7 +113,7 @@ func TestSocketListener_KnownEventSignalsWake(t *testing.T) {
 			listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			_ = listener.connect(ctx)
+			_ = listener.connect(ctx, func() {})
 
 			select {
 			case <-wake:
@@ -133,7 +133,7 @@ func TestSocketListener_UnknownEventDoesNotSignalWake(t *testing.T) {
 	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = listener.connect(ctx)
+	_ = listener.connect(ctx, func() {})
 
 	select {
 	case <-wake:

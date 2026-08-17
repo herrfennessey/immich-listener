@@ -1,7 +1,7 @@
 // Package nats is a Publisher adapter for NATS JetStream.
 //
-// It implements core.Publisher. It is one possible queue. To use a different
-// queue, write a new adapter that implements core.Publisher.
+// It implements core.Publisher. It is one possible messaging system. To use a
+// different messaging system, write a new adapter that implements core.Publisher.
 package nats
 
 import (
@@ -51,7 +51,7 @@ func NewPublisher(ctx context.Context, url, streamName, subjectPrefix string) (*
 		Subjects:    []string{subjectPrefix + ".>"},
 		Storage:     jetstream.FileStorage,
 		Retention:   jetstream.LimitsPolicy,
-		MaxAge:      7 * 24 * time.Hour,
+		MaxAge:      7 * 24 * time.Hour, // 7 days
 		Replicas:    1,
 		Description: "Immich lifecycle events",
 	})

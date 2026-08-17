@@ -4,8 +4,8 @@
 // /api/sync/stream for durable, checkpointed delivery. It sends every change to
 // a Publisher adapter, then advances the Immich cursor.
 //
-// The queue is a port (see internal/core). This binary uses the NATS adapter.
-// To use a different queue, add an adapter and wire it here.
+// The messaging system is a port (see internal/core). This binary uses the NATS
+// adapter. To use a different messaging system, add an adapter and wire it here.
 //
 // The environment holds the configuration. See internal/config.
 package main
@@ -36,7 +36,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Outbound adapter: the message queue. Replace this to use another queue.
+	// Outbound adapter: the messaging system. Replace this to use another one.
 	publisher, err := natsadapter.NewPublisher(ctx, cfg.NATSURL, cfg.NATSStreamName, cfg.NATSSubjectPrefix)
 	if err != nil {
 		slog.Error("nats publisher error", "err", err)

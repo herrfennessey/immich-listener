@@ -34,7 +34,7 @@ type Event struct {
 	// AlbumID is set for album events and AlbumMembership events.
 	AlbumID string `json:"albumId,omitempty"`
 	// AlbumIDs is the full set of albums that contain the asset. It is set on
-	// AssetUpserted.
+	// AssetUpserted and AssetTrashed.
 	AlbumIDs []string `json:"albumIds,omitempty"`
 
 	// OwnerID, Checksum, and AssetType are set on AssetUpserted.

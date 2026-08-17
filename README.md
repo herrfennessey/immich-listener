@@ -31,7 +31,7 @@ The table uses the default `immich` prefix (`NATS_SUBJECT_PREFIX`).
 | Subject | When emitted |
 |---------|-------------|
 | `immich.asset.upserted` | Asset created or updated (`AssetV2` with no `deletedAt`, or an `AssetExifV1` metadata edit). Carries `ownerId`, `checksum`, `assetType`, and the asset's full `albumIds[]` (read from the Immich API). |
-| `immich.asset.trashed`  | Asset moved to trash (`AssetV2` with a non-null `deletedAt`). |
+| `immich.asset.trashed`  | Asset moved to trash (`AssetV2` with a non-null `deletedAt`). Carries `albumIds[]` so a downstream can clear the asset from those albums. |
 | `immich.asset.deleted`  | Asset permanently deleted (`AssetDeleteV1`). |
 | `immich.album.changed`  | Album metadata created or updated (`AlbumV2`). Carries `name` and `description`. |
 | `immich.album.deleted`  | Album deleted (`AlbumDeleteV1`). |
@@ -100,10 +100,12 @@ networks:
     name: ${IMMICH_NETWORK:-immich_default}
 ```
 
-Verify the sidecar can see Immich after `up`:
+Verify the network reaches Immich. The sidecar image is distroless and has no
+shell, so run the check from a throwaway container on the same network:
 
 ```sh
-docker compose exec sidecar wget -qO- http://immich-server:2283/api/server/ping
+docker run --rm --network "${IMMICH_NETWORK:-immich_default}" curlimages/curl \
+  -s http://immich-server:2283/api/server/ping
 # {"res":"pong"}
 ```
 

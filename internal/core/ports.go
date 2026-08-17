@@ -1,9 +1,9 @@
 // Package core defines the ports between the sidecar and its adapters.
 //
-// The sidecar reads changes from Immich and sends events to a message queue.
-// The queue is a port. Each queue integration is an adapter that implements the
-// Publisher interface. To use a different queue, add an adapter. Do not change
-// the sidecar core.
+// The sidecar reads changes from Immich and sends events to a messaging system.
+// The messaging system is a port. Each integration is an adapter that
+// implements the Publisher interface. To use a different messaging system, add
+// an adapter. Do not change the sidecar core.
 package core
 
 import (
@@ -12,11 +12,11 @@ import (
 	"github.com/herrfennessey/immich-listener/internal/events"
 )
 
-// Publisher sends one event to a durable message queue. Adapters implement this
-// interface. The sidecar uses one Publisher at a time.
+// Publisher sends one event to a durable messaging system. Adapters implement
+// this interface. The sidecar uses one Publisher at a time.
 type Publisher interface {
-	// Publish sends the event and returns only after the queue stores it.
-	// A non-nil error means the queue did not store the event.
+	// Publish sends the event and returns only after the messaging system
+	// stores it. A non-nil error means the system did not store the event.
 	Publish(ctx context.Context, event events.Event) error
 }
 
