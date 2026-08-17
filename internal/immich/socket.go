@@ -165,12 +165,6 @@ func (l *SocketListener) handleSocketIOMessage(ctx context.Context, payload stri
 
 // dispatchSocketEvent maps an Immich socket event name to a canonical event.
 func (l *SocketListener) dispatchSocketEvent(ctx context.Context, name string, arg json.RawMessage) error {
-	// Trigger sync stream immediately for any known event.
-	select {
-	case l.wake <- struct{}{}:
-	default:
-	}
-
 	var ev events.Event
 	switch name {
 	case "on_upload_success":
@@ -191,6 +185,12 @@ func (l *SocketListener) dispatchSocketEvent(ctx context.Context, name string, a
 	default:
 		slog.Debug("socket.io: ignoring unknown event", "name", name)
 		return nil
+	}
+
+	// Trigger an immediate sync-stream pass for every known event.
+	select {
+	case l.wake <- struct{}{}:
+	default:
 	}
 
 	if err := l.publish(ctx, ev); err != nil {
