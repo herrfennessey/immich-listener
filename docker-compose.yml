@@ -1,0 +1,31 @@
+services:
+  nats:
+    image: nats:2-alpine
+    command: ["--jetstream", "--store_dir=/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats-data:/data
+    restart: unless-stopped
+
+  sidecar:
+    build: .
+    environment:
+      IMMICH_BASE_URL: ${IMMICH_BASE_URL:-http://immich-server:2283}
+      IMMICH_API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required}
+      NATS_URL: nats://nats:4222
+      NATS_STREAM_NAME: ${NATS_STREAM_NAME:-IMMICH}
+      NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-immich}
+      CHECKPOINT_FILE: /data/checkpoint.json
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-30s}
+      SOCKETIO_ENABLED: ${SOCKETIO_ENABLED:-true}
+    volumes:
+      - sidecar-data:/data
+    depends_on:
+      - nats
+    restart: unless-stopped
+
+volumes:
+  nats-data:
+  sidecar-data:
