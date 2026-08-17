@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +16,35 @@ import (
 )
 
 func strPtr(s string) *string { return &s }
+
+// fakeAlbums is an in-memory AlbumResolver for tests.
+type fakeAlbums struct {
+	m map[string]map[string]struct{}
+}
+
+func newFakeAlbums() *fakeAlbums { return &fakeAlbums{m: map[string]map[string]struct{}{}} }
+
+func (f *fakeAlbums) Add(_ context.Context, assetID, albumID string) error {
+	if f.m[assetID] == nil {
+		f.m[assetID] = map[string]struct{}{}
+	}
+	f.m[assetID][albumID] = struct{}{}
+	return nil
+}
+
+func (f *fakeAlbums) Remove(_ context.Context, assetID, albumID string) error {
+	delete(f.m[assetID], albumID)
+	return nil
+}
+
+func (f *fakeAlbums) Albums(_ context.Context, assetID string) ([]string, error) {
+	var out []string
+	for a := range f.m[assetID] {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 // makeStreamBody encodes rows as newline-delimited JSON (the sync stream wire format).
 func makeStreamBody(rows []any) string {
@@ -83,7 +113,7 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 		func(_ context.Context, ev events.Event) error {
 			published = append(published, ev)
 			return nil
-		})
+		}, newFakeAlbums())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -110,8 +140,8 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 		}
 	}
 
-	// asset-1 upsert should carry albumIds resolved from the AlbumToAssetV1 row,
-	// plus the enrichment fields from AssetV2 data.
+	// asset-1 upsert should carry albumIds resolved from the membership index
+	// (the AlbumToAssetV1 row was folded in during pass 1), plus enrichment fields.
 	up := published[0]
 	if len(up.AlbumIDs) != 1 || up.AlbumIDs[0] != "album-3" {
 		t.Errorf("asset-1 AlbumIDs = %v, want [album-3]", up.AlbumIDs)
@@ -165,6 +195,42 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 	}
 }
 
+// TestSyncStreamConsumer_AlbumsFromPriorBatch is the direct regression for the
+// case Immich emits an AssetV2 edit with no AlbumToAsset delta in the batch: the
+// upsert must still carry the asset's albums from the persisted index.
+func TestSyncStreamConsumer_AlbumsFromPriorBatch(t *testing.T) {
+	rows := []any{
+		syncRow{Type: "AssetV2", Ack: "AssetV2|200", Data: syncData{ID: "asset-1"}},
+		syncRow{Type: "SyncCompleteV1", Ack: "SyncCompleteV1|1"},
+	}
+	srv, _ := streamAndAckServer(t, makeStreamBody(rows))
+	defer srv.Close()
+
+	albums := newFakeAlbums()
+	_ = albums.Add(context.Background(), "asset-1", "album-a") // seeded by an earlier batch
+	_ = albums.Add(context.Background(), "asset-1", "album-b")
+
+	var published []events.Event
+	consumer := NewSyncStreamConsumer(srv.URL, "test-key",
+		func(_ context.Context, ev events.Event) error {
+			published = append(published, ev)
+			return nil
+		}, albums)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := consumer.runOnce(ctx); err != nil {
+		t.Fatalf("runOnce error: %v", err)
+	}
+	if len(published) != 1 {
+		t.Fatalf("published %d events, want 1", len(published))
+	}
+	want := []string{"album-a", "album-b"}
+	if strings.Join(published[0].AlbumIDs, ",") != strings.Join(want, ",") {
+		t.Errorf("AlbumIDs = %v, want %v", published[0].AlbumIDs, want)
+	}
+}
+
 func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	var receivedTypes []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +244,7 @@ func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	defer srv.Close()
 
 	consumer := NewSyncStreamConsumer(srv.URL, "key",
-		func(_ context.Context, _ events.Event) error { return nil })
+		func(_ context.Context, _ events.Event) error { return nil }, newFakeAlbums())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = consumer.runOnce(ctx)
@@ -212,7 +278,7 @@ func TestSyncStreamConsumer_PublishFailPreventsAck(t *testing.T) {
 	consumer := NewSyncStreamConsumer(srv.URL, "test-key",
 		func(_ context.Context, _ events.Event) error {
 			return fmt.Errorf("nats unavailable")
-		})
+		}, newFakeAlbums())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -241,7 +307,7 @@ func TestSyncStreamConsumer_NoAckWhenEmpty(t *testing.T) {
 	defer srv.Close()
 
 	consumer := NewSyncStreamConsumer(srv.URL, "key",
-		func(_ context.Context, _ events.Event) error { return nil })
+		func(_ context.Context, _ events.Event) error { return nil }, newFakeAlbums())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -260,7 +326,7 @@ func TestSyncStreamConsumer_HTTPError(t *testing.T) {
 	defer srv.Close()
 
 	consumer := NewSyncStreamConsumer(srv.URL, "key",
-		func(_ context.Context, _ events.Event) error { return nil })
+		func(_ context.Context, _ events.Event) error { return nil }, newFakeAlbums())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := consumer.runOnce(ctx); err == nil {
@@ -268,11 +334,20 @@ func TestSyncStreamConsumer_HTTPError(t *testing.T) {
 	}
 }
 
-func TestSyncStreamConsumer_InvalidJSON(t *testing.T) {
-	body := "not-json\n" + `{"type":"AssetV2","ack":"AssetV2|1","data":{"id":"a1"}}` + "\n"
+// A malformed line must fail the whole pass (no ack), not be silently skipped —
+// otherwise the cursor advances past a change that was never published.
+func TestSyncStreamConsumer_MalformedLineFailsAndDoesNotAck(t *testing.T) {
+	body := `{"type":"AssetV2","ack":"AssetV2|1","data":{"id":"a1"}}` + "\n" + "not-json\n"
+	var ackCalled bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(body))
+		switch r.URL.Path {
+		case "/api/sync/stream":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(body))
+		case "/api/sync/ack":
+			ackCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		}
 	}))
 	defer srv.Close()
 
@@ -281,19 +356,21 @@ func TestSyncStreamConsumer_InvalidJSON(t *testing.T) {
 		func(_ context.Context, ev events.Event) error {
 			published = append(published, ev)
 			return nil
-		})
+		}, newFakeAlbums())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := consumer.runOnce(ctx); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := consumer.runOnce(ctx); err == nil {
+		t.Fatal("expected error on malformed sync line")
 	}
-	if len(published) != 1 {
-		t.Errorf("published %d events, want 1", len(published))
+	if ackCalled {
+		t.Error("ack must not be called when a line failed to parse")
+	}
+	if len(published) != 0 {
+		t.Errorf("no events should be published when the batch failed to parse; got %d", len(published))
 	}
 }
 
 func TestSyncRowToEvent_AllTypes(t *testing.T) {
-	emptyIdx := map[string][]string{}
 	tests := []struct {
 		row     syncRow
 		wantOK  bool
@@ -312,7 +389,7 @@ func TestSyncRowToEvent_AllTypes(t *testing.T) {
 		{syncRow{Type: "unknown"}, false, ""},
 	}
 	for _, tt := range tests {
-		ev, ok := syncRowToEvent(tt.row, emptyIdx)
+		ev, ok := syncRowToEvent(tt.row)
 		if ok != tt.wantOK {
 			t.Errorf("syncRowToEvent(%q) ok=%v, want %v", tt.row.Type, ok, tt.wantOK)
 			continue
@@ -324,53 +401,21 @@ func TestSyncRowToEvent_AllTypes(t *testing.T) {
 }
 
 func TestSyncRowToEvent_DeleteUsesCorrectID(t *testing.T) {
-	emptyIdx := map[string][]string{}
-
-	ev, _ := syncRowToEvent(syncRow{Type: "AssetDeleteV1", Data: syncData{AssetID: "asset-x"}}, emptyIdx)
+	ev, _ := syncRowToEvent(syncRow{Type: "AssetDeleteV1", Data: syncData{AssetID: "asset-x"}})
 	if ev.AssetID != "asset-x" {
 		t.Errorf("AssetDeleteV1 AssetID = %q, want asset-x (from data.assetId)", ev.AssetID)
 	}
-	ev, _ = syncRowToEvent(syncRow{Type: "AlbumDeleteV1", Data: syncData{AlbumID: "album-x"}}, emptyIdx)
+	ev, _ = syncRowToEvent(syncRow{Type: "AlbumDeleteV1", Data: syncData{AlbumID: "album-x"}})
 	if ev.AlbumID != "album-x" {
 		t.Errorf("AlbumDeleteV1 AlbumID = %q, want album-x (from data.albumId)", ev.AlbumID)
-	}
-}
-
-func TestSyncRowToEvent_AlbumIDs(t *testing.T) {
-	idx := map[string][]string{"asset-1": {"album-a", "album-b"}}
-	ev, ok := syncRowToEvent(syncRow{Type: "AssetV2", Data: syncData{ID: "asset-1"}}, idx)
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	if len(ev.AlbumIDs) != 2 {
-		t.Errorf("AlbumIDs = %v, want [album-a album-b]", ev.AlbumIDs)
-	}
-}
-
-func TestBuildAssetAlbumsIndex(t *testing.T) {
-	rows := []syncRow{
-		{Type: "AlbumToAssetV1", Data: syncData{AlbumID: "al1", AssetID: "a1"}},
-		{Type: "AlbumToAssetV1", Data: syncData{AlbumID: "al2", AssetID: "a1"}},
-		{Type: "AlbumToAssetV1", Data: syncData{AlbumID: "al3", AssetID: "a2"}},
-		{Type: "AssetV2", Data: syncData{ID: "a3"}}, // should be ignored
-	}
-	idx := buildAssetAlbumsIndex(rows)
-	if len(idx["a1"]) != 2 {
-		t.Errorf("a1 albums = %v, want 2", idx["a1"])
-	}
-	if len(idx["a2"]) != 1 {
-		t.Errorf("a2 albums = %v, want 1", idx["a2"])
-	}
-	if _, ok := idx["a3"]; ok {
-		t.Error("a3 should not be in index")
 	}
 }
 
 func TestCollectAcks(t *testing.T) {
 	rows := []syncRow{
 		{Type: "AssetV2", Ack: "AssetV2|1"},
-		{Type: "AssetV2", Ack: "AssetV2|2"},         // last wins
-		{Type: "SyncAckV1", Ack: "AssetV2|3"},       // backfill marker, keyed by real type
+		{Type: "AssetV2", Ack: "AssetV2|2"},   // last wins
+		{Type: "SyncAckV1", Ack: "AssetV2|3"}, // backfill marker, keyed by real type
 		{Type: "AlbumV2", Ack: "AlbumV2|9"},
 		{Type: "SyncResetV1", Ack: "SyncResetV1|0"}, // must be dropped
 		{Type: "AssetV2"},                           // no ack, ignored

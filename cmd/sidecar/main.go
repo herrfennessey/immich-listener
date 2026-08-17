@@ -47,11 +47,17 @@ func main() {
 		return pub.Publish(ctx, ev)
 	}
 
+	membership, err := natspkg.NewMembershipStore(ctx, pub.JetStream(), cfg.MembershipBucket)
+	if err != nil {
+		slog.Error("membership store error", "err", err)
+		os.Exit(1)
+	}
+
 	// wake is used by the socket listener to poke the sync stream consumer
 	// into running immediately rather than waiting for the next tick.
 	wake := make(chan struct{}, 1)
 
-	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, cfg.ImmichAPIKey, publish)
+	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, cfg.ImmichAPIKey, publish, membership)
 
 	if cfg.SocketIOEnabled {
 		socketListener := immichpkg.NewSocketListener(cfg.ImmichBaseURL, cfg.ImmichAPIKey, wake)

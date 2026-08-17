@@ -73,6 +73,11 @@ func (p *Publisher) Publish(ctx context.Context, ev events.Event) error {
 	return nil
 }
 
+// JetStream returns the underlying JetStream context, e.g. for opening a KV store.
+func (p *Publisher) JetStream() jetstream.JetStream {
+	return p.js
+}
+
 // Close drains and closes the NATS connection.
 func (p *Publisher) Close() {
 	_ = p.nc.Drain()

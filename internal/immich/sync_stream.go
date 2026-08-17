@@ -30,6 +30,15 @@ var syncRequestTypes = []string{
 	"AlbumToAssetsV1", // AlbumToAssetV1 / AlbumToAssetDeleteV1 (membership)
 }
 
+// AlbumResolver maintains and answers the asset → albums membership index. It is
+// updated from AlbumToAsset deltas and queried to enrich asset upserts with the
+// asset's full album set (see MembershipStore in internal/nats).
+type AlbumResolver interface {
+	Add(ctx context.Context, assetID, albumID string) error
+	Remove(ctx context.Context, assetID, albumID string) error
+	Albums(ctx context.Context, assetID string) ([]string, error)
+}
+
 // SyncStreamConsumer reads from POST /api/sync/stream, converts deltas to Events,
 // publishes them to NATS JetStream, and only then advances the server-side cursor
 // via POST /api/sync/ack.  If any publish fails the cursor is NOT advanced, so the
@@ -42,16 +51,19 @@ type SyncStreamConsumer struct {
 	apiKey     string
 	httpClient *http.Client
 	publish    func(context.Context, events.Event) error
+	albums     AlbumResolver
 }
 
 // NewSyncStreamConsumer creates a consumer.  publish is called for every event
 // parsed and must confirm durable delivery (NATS JetStream ack) before returning nil.
-func NewSyncStreamConsumer(baseURL, apiKey string, publish func(context.Context, events.Event) error) *SyncStreamConsumer {
+// albums maintains the asset→albums membership index used to enrich asset upserts.
+func NewSyncStreamConsumer(baseURL, apiKey string, publish func(context.Context, events.Event) error, albums AlbumResolver) *SyncStreamConsumer {
 	return &SyncStreamConsumer{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 5 * time.Minute},
 		publish:    publish,
+		albums:     albums,
 	}
 }
 
@@ -108,7 +120,11 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return fmt.Errorf("sync stream returned %d: %s", resp.StatusCode, body)
 	}
 
-	// Read the whole batch first so we can resolve albumIds[] for asset events.
+	// Read the whole batch first. A malformed line is a hard error: skipping it
+	// and then acking would advance the cursor past a change we never published,
+	// losing it permanently. Failing here leaves the cursor unacked so the batch
+	// replays. (Immich emits valid JSON, so this is an exceptional path; the
+	// nightly full reconcile is the backstop if a line is persistently poisonous.)
 	rows, err := parseSyncStream(resp.Body)
 	if err != nil {
 		return fmt.Errorf("parse sync stream: %w", err)
@@ -117,16 +133,41 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return nil
 	}
 
-	// Build assetId → []albumId from the AlbumToAsset deltas in this batch.
-	assetAlbums := buildAssetAlbumsIndex(rows)
+	// Pass 1: fold this batch's membership deltas into the durable index *before*
+	// resolving albumIds, so an asset upsert reflects post-batch membership. If a
+	// membership update can't be persisted we must not ack, or we'd lose it.
+	for _, row := range rows {
+		switch row.Type {
+		case entityAlbumToAsset:
+			if row.Data.AssetID != "" && row.Data.AlbumID != "" {
+				if err := s.albums.Add(ctx, row.Data.AssetID, row.Data.AlbumID); err != nil {
+					return fmt.Errorf("membership add: %w", err)
+				}
+			}
+		case entityAlbumToAssetDelete:
+			if row.Data.AssetID != "" && row.Data.AlbumID != "" {
+				if err := s.albums.Remove(ctx, row.Data.AssetID, row.Data.AlbumID); err != nil {
+					return fmt.Errorf("membership remove: %w", err)
+				}
+			}
+		}
+	}
 
-	// Publish all events.  On the first publish failure, stop and return without
-	// acking so Immich replays the whole batch on the next pass.
+	// Pass 2: publish all events.  On the first publish failure, stop and return
+	// without acking so Immich replays the whole batch on the next pass.
 	published := 0
 	for _, row := range rows {
-		ev, ok := syncRowToEvent(row, assetAlbums)
+		ev, ok := syncRowToEvent(row)
 		if !ok {
 			continue
+		}
+		// Enrich asset upserts with the asset's full album set from the index.
+		if ev.Type == events.AssetUpserted {
+			albumIDs, err := s.albums.Albums(ctx, ev.AssetID)
+			if err != nil {
+				return fmt.Errorf("resolve albums for %s: %w", ev.AssetID, err)
+			}
+			ev.AlbumIDs = albumIDs
 		}
 		if err := s.publish(ctx, ev); err != nil {
 			return fmt.Errorf("publish %s: %w", row.Type, err)
@@ -180,6 +221,8 @@ func (s *SyncStreamConsumer) ack(ctx context.Context, acks []string) error {
 }
 
 // parseSyncStream reads all JSON-lines from r and returns the decoded rows.
+// A line that fails to decode is a hard error rather than a silent skip, so the
+// caller can refuse to ack and let the batch replay instead of losing the change.
 func parseSyncStream(r io.Reader) ([]syncRow, error) {
 	var rows []syncRow
 	scanner := bufio.NewScanner(r)
@@ -191,28 +234,11 @@ func parseSyncStream(r io.Reader) ([]syncRow, error) {
 		}
 		var row syncRow
 		if err := json.Unmarshal(line, &row); err != nil {
-			slog.Warn("sync stream: unparseable line", "line", string(line), "err", err)
-			continue
+			return nil, fmt.Errorf("unparseable sync line %q: %w", string(line), err)
 		}
 		rows = append(rows, row)
 	}
 	return rows, scanner.Err()
-}
-
-// buildAssetAlbumsIndex maps assetId → []albumId from AlbumToAssetV1 rows in the
-// batch. This is an in-batch delta only, not the asset's full album set.
-func buildAssetAlbumsIndex(rows []syncRow) map[string][]string {
-	idx := make(map[string][]string)
-	for _, row := range rows {
-		if row.Type != entityAlbumToAsset {
-			continue
-		}
-		if row.Data.AssetID == "" || row.Data.AlbumID == "" {
-			continue
-		}
-		idx[row.Data.AssetID] = append(idx[row.Data.AssetID], row.Data.AlbumID)
-	}
-	return idx
 }
 
 // collectAcks returns the final ack string per entity type across the batch.
@@ -304,9 +330,9 @@ type syncData struct {
 func boolPtr(b bool) *bool { return &b }
 
 // syncRowToEvent maps an Immich sync row to a canonical sidecar event.
-// assetAlbums is the asset→albums index built from the same batch.
 // Returns (event, true) if the row type is one downstream cares about.
-func syncRowToEvent(row syncRow, assetAlbums map[string][]string) (events.Event, bool) {
+// AlbumIDs on asset upserts is filled in by the caller from the membership index.
+func syncRowToEvent(row syncRow) (events.Event, bool) {
 	switch row.Type {
 	case entityAssetV2:
 		if row.Data.DeletedAt != nil && *row.Data.DeletedAt != "" {
@@ -315,7 +341,6 @@ func syncRowToEvent(row syncRow, assetAlbums map[string][]string) (events.Event,
 		return events.Event{
 			Type:      events.AssetUpserted,
 			AssetID:   row.Data.ID,
-			AlbumIDs:  assetAlbums[row.Data.ID],
 			OwnerID:   row.Data.OwnerID,
 			Checksum:  row.Data.Checksum,
 			AssetType: row.Data.AssetType,
@@ -323,9 +348,8 @@ func syncRowToEvent(row syncRow, assetAlbums map[string][]string) (events.Event,
 	case entityAssetExif:
 		// A metadata-only edit still changes what the gallery renders.
 		return events.Event{
-			Type:     events.AssetUpserted,
-			AssetID:  row.Data.AssetID,
-			AlbumIDs: assetAlbums[row.Data.AssetID],
+			Type:    events.AssetUpserted,
+			AssetID: row.Data.AssetID,
 		}, true
 	case entityAssetDelete:
 		return events.Event{Type: events.AssetDeleted, AssetID: row.Data.AssetID}, true
