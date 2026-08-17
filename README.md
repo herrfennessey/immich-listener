@@ -162,10 +162,11 @@ Docker is required for the real-stack test:
 go test -tags=integration ./internal/immich -run TestRealImmichAssetUpsert -v
 ```
 
-Testcontainers starts a disposable, pinned Immich v3.1.0 Compose stack with
+Testcontainers starts a disposable Immich v3.1.0 release-runtime stack with
 PostgreSQL, Valkey, and NATS JetStream, then uploads an embedded fixture image
-and verifies the sidecar emits `immich.asset.upserted`. Containers and volumes
-are removed automatically when the test finishes.
+and verifies the sidecar emits `immich.asset.upserted`. The Compose fixture is
+derived from Immich's release Compose file and monitored by Dependabot. Containers
+and volumes are removed automatically when the test finishes.
 
 ## Building the binary
 

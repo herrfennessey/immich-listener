@@ -1,0 +1,6 @@
+version: 2
+updates:
+  - package-ecosystem: docker-compose
+    directory: /internal/immich/testdata
+    schedule:
+      interval: weekly

@@ -1,3 +1,6 @@
+# Minimal Immich release runtime derived from
+# https://github.com/immich-app/immich/blob/v3.1.0/docker/docker-compose.yml.
+# Keep these image references literal so Dependabot can update them.
 services:
   immich-server:
     image: ghcr.io/immich-app/immich-server:v3.1.0

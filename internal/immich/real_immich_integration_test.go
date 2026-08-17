@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,13 +23,23 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+func TestImmichComposeFile(t *testing.T) {
+	want, err := filepath.Abs(filepath.Join("testdata", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("resolve fixture path: %v", err)
+	}
+	if got := immichComposeFile(t); got != want {
+		t.Errorf("Compose file = %q, want %q", got, want)
+	}
+}
+
 func TestRealImmichAssetUpsert(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	stack, err := compose.NewDockerComposeWith(
 		compose.StackIdentifier("immich-listener-e2e"),
-		compose.WithStackFiles(filepath.Join("testdata", "immich-compose.yml")),
+		compose.WithStackFiles(immichComposeFile(t)),
 	)
 	if err != nil {
 		t.Fatalf("create Compose stack: %v", err)
@@ -92,6 +103,18 @@ func TestRealImmichAssetUpsert(t *testing.T) {
 	if event.AssetID != assetID {
 		t.Errorf("event assetId = %q, want uploaded asset %q", event.AssetID, assetID)
 	}
+}
+
+func immichComposeFile(t *testing.T) string {
+	t.Helper()
+	composeFile, err := filepath.Abs(filepath.Join("testdata", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("resolve Compose fixture path: %v", err)
+	}
+	if _, err := os.Stat(composeFile); err != nil {
+		t.Fatalf("stat Compose fixture: %v", err)
+	}
+	return composeFile
 }
 
 type realImmichClient struct {
