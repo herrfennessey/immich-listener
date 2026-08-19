@@ -44,16 +44,25 @@ func main() {
 	}
 	defer publisher.Close()
 
+	// Immich's checkpointed sync API requires a user session; it deliberately
+	// rejects API keys. Verify the credentials before starting the run loop so a
+	// configuration error is immediately visible.
+	session := immichpkg.NewSessionClient(cfg.ImmichBaseURL, cfg.ImmichEmail, cfg.ImmichPassword, cfg.ImmichSessionTokenFile)
+	if _, err := session.Token(ctx); err != nil {
+		slog.Error("immich session login error", "err", err)
+		os.Exit(1)
+	}
+
 	// AlbumResolver reads album membership from the Immich API.
-	albums := immichpkg.NewAlbumClient(cfg.ImmichBaseURL, cfg.ImmichAPIKey)
+	albums := immichpkg.NewAlbumClient(cfg.ImmichBaseURL, session)
 
 	// wake lets the socket listener start a sync pass at once.
 	wake := make(chan struct{}, 1)
 
-	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, cfg.ImmichAPIKey, publisher, albums)
+	sync := immichpkg.NewSyncStreamConsumer(cfg.ImmichBaseURL, session, publisher, albums)
 
 	if cfg.SocketIOEnabled {
-		socketListener := immichpkg.NewSocketListener(cfg.ImmichBaseURL, cfg.ImmichAPIKey, wake)
+		socketListener := immichpkg.NewSocketListener(cfg.ImmichBaseURL, session, wake)
 		go socketListener.Run(ctx)
 	}
 

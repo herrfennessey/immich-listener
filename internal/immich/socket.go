@@ -20,23 +20,30 @@ import (
 // events. This prevents duplicate events and ID mismatches.
 type SocketListener struct {
 	baseURL string
-	apiKey  string
+	session SessionTokenSource
 	wake    chan<- struct{}
+	// readTimeout bounds a single frame read. Immich pings about every
+	// pingInterval (~25s), so a healthy connection always delivers a frame
+	// within this window. A silent (half-open) connection trips the deadline
+	// and is reconnected instead of blocking until OS TCP keepalive.
+	readTimeout time.Duration
 }
 
 // NewSocketListener creates a listener. wake receives a signal for each known
 // Immich event.
-func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}) *SocketListener {
+func NewSocketListener(baseURL string, session SessionTokenSource, wake chan<- struct{}) *SocketListener {
 	return &SocketListener{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		wake:    wake,
+		baseURL:     baseURL,
+		session:     session,
+		wake:        wake,
+		readTimeout: 45 * time.Second, // pingInterval(25s) + pingTimeout(20s)
 	}
 }
 
 // Run connects to the Socket.IO endpoint until ctx ends. After an error, Run
-// reconnects with exponential back-off. A successful connection resets the
-// back-off, so a session that stayed up for a long time reconnects fast.
+// reconnects with exponential back-off. A completed connection (through the
+// Socket.IO namespace CONNECT ack) resets the back-off, so a session that
+// stayed up for a long time reconnects fast.
 func (l *SocketListener) Run(ctx context.Context) {
 	backoff := time.Second
 	for {
@@ -57,8 +64,10 @@ func (l *SocketListener) Run(ctx context.Context) {
 }
 
 // connect opens one WebSocket session. connect returns when the connection
-// closes or when ctx ends. connect calls onConnect once, after the dial
-// succeeds.
+// closes or when ctx ends. connect calls onConnect once, when the server
+// acknowledges the Socket.IO namespace CONNECT ("40") — not on the raw dial, so
+// a WS upgrade that is accepted but rejected at the namespace level (e.g. an
+// expired token) does not reset the reconnect back-off.
 func (l *SocketListener) connect(ctx context.Context, onConnect func()) error {
 	// Change the URL scheme: http to ws, https to wss.
 	wsURL := l.baseURL
@@ -69,8 +78,12 @@ func (l *SocketListener) connect(ctx context.Context, onConnect func()) error {
 	}
 	wsURL += "/api/socket.io/?EIO=4&transport=websocket"
 
+	token, err := l.session.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("get Immich session token: %w", err)
+	}
 	headers := http.Header{}
-	headers.Set("x-api-key", l.apiKey)
+	headers.Set("x-immich-session-token", token)
 
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
@@ -79,13 +92,23 @@ func (l *SocketListener) connect(ctx context.Context, onConnect func()) error {
 	defer conn.CloseNow()
 
 	slog.Info("socket.io connected", "url", wsURL)
-	onConnect()
 
 	// Engine.IO / Socket.IO framing loop.
+	connected := false
 	for {
-		_, msg, err := conn.Read(ctx)
+		// Bound each read so a half-open connection is detected rather than
+		// blocking on conn.Read until OS TCP keepalive.
+		readCtx, cancel := context.WithTimeout(ctx, l.readTimeout)
+		_, msg, err := conn.Read(readCtx)
+		cancel()
 		if err != nil {
 			return fmt.Errorf("ws read: %w", err)
+		}
+		// The server's namespace CONNECT ack ("40") means the session is fully
+		// established. Only now is it safe to reset the reconnect back-off.
+		if !connected && strings.HasPrefix(string(msg), "40") {
+			connected = true
+			onConnect()
 		}
 		if err := l.handleFrame(ctx, conn, string(msg)); err != nil {
 			slog.Warn("socket.io frame error", "err", err)

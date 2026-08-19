@@ -123,7 +123,8 @@ docker run --rm --network "${IMMICH_NETWORK:-immich_default}" curlimages/curl \
 ## Running with Docker Compose
 
 ```sh
-# 1. Copy the example env file, fill in your Immich API key, and set IMMICH_NETWORK
+# 1. Copy the example env file, fill in the credentials for the user that owns
+#    this sidecar's sync checkpoint, and set IMMICH_NETWORK
 #    (see "Connecting to Immich" above).
 cp .env.example .env
 $EDITOR .env
@@ -139,7 +140,9 @@ docker compose logs -f sidecar
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `IMMICH_API_KEY` | **required** | Immich owner API key. |
+| `IMMICH_EMAIL` | **required** | Email for the Immich user session used by durable sync and Socket.IO. |
+| `IMMICH_PASSWORD` | **required** | Password for the Immich user session used by durable sync and Socket.IO. |
+| `IMMICH_SESSION_TOKEN_FILE` | `/data/session-token` | Persistent account-bound session token. The Compose `sidecar-init` service makes the dedicated `/data` volume writable before the sidecar starts, preserving Immich's server-side sync checkpoint across restarts. |
 | `IMMICH_NETWORK` | `immich_default` | Name of Immich's Docker network to attach to (see "Connecting to Immich"). Compose-only. |
 | `IMMICH_BASE_URL` | `http://immich-server:2283` | Immich server base URL. |
 | `NATS_URL` | `nats://localhost:4222` | NATS server URL. |
@@ -153,6 +156,20 @@ docker compose logs -f sidecar
 ```sh
 go test -race ./...
 ```
+
+### Immich end-to-end tests
+
+Docker is required for the Immich end-to-end suite:
+
+```sh
+go test -tags=integration ./internal/immich -v
+```
+
+Testcontainers starts a disposable Immich v3.1.0 release-runtime stack with
+PostgreSQL, Valkey, and NATS JetStream, then uploads an embedded fixture image
+and verifies the sidecar emits `immich.asset.upserted`. The Compose fixture is
+derived from Immich's release Compose file and monitored by Dependabot. Containers
+and volumes are removed automatically when the test finishes.
 
 ## Building the binary
 

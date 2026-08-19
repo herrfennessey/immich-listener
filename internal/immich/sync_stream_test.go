@@ -66,7 +66,7 @@ func streamAndAckServer(t *testing.T, streamBody string) (*httptest.Server, *[]s
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/sync/stream":
-			if r.Header.Get("x-api-key") != "test-key" {
+			if r.Header.Get("x-immich-session-token") != "test-key" {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -111,7 +111,7 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 		"asset-1":       {"album-x", "album-y"},
 		"asset-trashed": {"album-z"},
 	}}
-	consumer := NewSyncStreamConsumer(srv.URL, "test-key", pub, albums)
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("test-key"), pub, albums)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -205,7 +205,7 @@ func TestSyncStreamConsumer_ResolverErrorFailsPass(t *testing.T) {
 
 	pub := &capturePublisher{}
 	albums := fakeAlbums{err: fmt.Errorf("immich down")}
-	consumer := NewSyncStreamConsumer(srv.URL, "test-key", pub, albums)
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("test-key"), pub, albums)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -232,7 +232,7 @@ func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key", &capturePublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), &capturePublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = consumer.runOnce(ctx)
@@ -261,7 +261,7 @@ func TestSyncStreamConsumer_PublishFailPreventsAck(t *testing.T) {
 	srv, acks := streamAndAckServer(t, makeStreamBody(rows))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "test-key", errPublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("test-key"), errPublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -288,7 +288,7 @@ func TestSyncStreamConsumer_NoAckWhenEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key", &capturePublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), &capturePublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -306,7 +306,7 @@ func TestSyncStreamConsumer_HTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key", &capturePublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), &capturePublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := consumer.runOnce(ctx); err == nil {
@@ -331,7 +331,7 @@ func TestSyncStreamConsumer_MalformedLineFailsAndDoesNotAck(t *testing.T) {
 	defer srv.Close()
 
 	pub := &capturePublisher{}
-	consumer := NewSyncStreamConsumer(srv.URL, "key", pub, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), pub, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := consumer.runOnce(ctx); err == nil {
@@ -342,6 +342,25 @@ func TestSyncStreamConsumer_MalformedLineFailsAndDoesNotAck(t *testing.T) {
 	}
 	if len(pub.events) != 0 {
 		t.Errorf("no events should be published when the batch failed to parse; got %d", len(pub.events))
+	}
+}
+
+// A single line larger than bufio.Scanner's old 4MB cap must still parse, so an
+// oversized row can never become a permanent poison line that blocks the cursor.
+func TestParseSyncStream_OversizedLine(t *testing.T) {
+	huge := strings.Repeat("x", 8*1024*1024) // 8 MiB, well past the old 4 MiB cap
+	row := syncRow{Type: "AlbumV2", Ack: "AlbumV2|1", Data: syncData{ID: "album-1", Description: huge}}
+	body := makeStreamBody([]any{row})
+
+	rows, err := parseSyncStream(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parseSyncStream on an oversized line: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("parsed %d rows, want 1", len(rows))
+	}
+	if len(rows[0].Data.Description) != len(huge) {
+		t.Errorf("description length = %d, want %d", len(rows[0].Data.Description), len(huge))
 	}
 }
 

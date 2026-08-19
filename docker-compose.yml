@@ -10,11 +10,23 @@ services:
       - nats-data:/data
     restart: unless-stopped
 
+  # Named volumes mount root-owned. Initialize this dedicated volume for the
+  # distroless nonroot sidecar before it persists its session token.
+  sidecar-init:
+    image: alpine:3.21
+    command: ["sh", "-ec", "chown -R 65532:65532 /data"]
+    user: "0:0"
+    volumes:
+      - sidecar-data:/data
+    restart: "no"
+
   sidecar:
     build: .
     environment:
       IMMICH_BASE_URL: ${IMMICH_BASE_URL:-http://immich-server:2283}
-      IMMICH_API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required}
+      IMMICH_EMAIL: ${IMMICH_EMAIL:?IMMICH_EMAIL is required}
+      IMMICH_PASSWORD: ${IMMICH_PASSWORD:?IMMICH_PASSWORD is required}
+      IMMICH_SESSION_TOKEN_FILE: ${IMMICH_SESSION_TOKEN_FILE:-/data/session-token}
       NATS_URL: nats://nats:4222
       NATS_STREAM_NAME: ${NATS_STREAM_NAME:-IMMICH}
       NATS_SUBJECT_PREFIX: ${NATS_SUBJECT_PREFIX:-immich}
@@ -24,7 +36,12 @@ services:
       - default # reach nats over this project's network
       - immich  # reach immich-server over Immich's network (external, below)
     depends_on:
-      - nats
+      nats:
+        condition: service_started
+      sidecar-init:
+        condition: service_completed_successfully
+    volumes:
+      - sidecar-data:/data
     restart: unless-stopped
 
 # ---------------------------------------------------------------------------
@@ -81,6 +98,7 @@ networks:
 
 volumes:
   nats-data:
+  sidecar-data:
   # redis-data:
   # rabbitmq-data:
   # redpanda-data:

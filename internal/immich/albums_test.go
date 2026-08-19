@@ -16,13 +16,13 @@ func TestAlbumClient_Albums(t *testing.T) {
 			return
 		}
 		gotAssetID = r.URL.Query().Get("assetId")
-		gotAPIKey = r.Header.Get("x-api-key")
+		gotAPIKey = r.Header.Get("x-immich-session-token")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{"id":"album-1","albumName":"Trip"},{"id":"album-2","albumName":"Pets"}]`))
 	}))
 	defer srv.Close()
 
-	c := NewAlbumClient(srv.URL, "test-key")
+	c := NewAlbumClient(srv.URL, staticSessionTokenSource("test-key"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -34,7 +34,7 @@ func TestAlbumClient_Albums(t *testing.T) {
 		t.Errorf("assetId query = %q, want asset-9", gotAssetID)
 	}
 	if gotAPIKey != "test-key" {
-		t.Errorf("x-api-key = %q, want test-key", gotAPIKey)
+		t.Errorf("x-immich-session-token = %q, want test-key", gotAPIKey)
 	}
 	if len(ids) != 2 || ids[0] != "album-1" || ids[1] != "album-2" {
 		t.Errorf("ids = %v, want [album-1 album-2]", ids)
@@ -47,7 +47,7 @@ func TestAlbumClient_AlbumsEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewAlbumClient(srv.URL, "k")
+	c := NewAlbumClient(srv.URL, staticSessionTokenSource("k"))
 	ids, err := c.Albums(context.Background(), "asset-1")
 	if err != nil {
 		t.Fatalf("Albums error: %v", err)
@@ -63,7 +63,7 @@ func TestAlbumClient_AlbumsHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewAlbumClient(srv.URL, "k")
+	c := NewAlbumClient(srv.URL, staticSessionTokenSource("k"))
 	if _, err := c.Albums(context.Background(), "asset-1"); err == nil {
 		t.Fatal("expected error on HTTP 401")
 	}
