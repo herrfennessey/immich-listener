@@ -37,7 +37,7 @@ var syncRequestTypes = []string{
 // session_sync_checkpoint table for the session of the API key.
 type SyncStreamConsumer struct {
 	baseURL    string
-	apiKey     string
+	session    SessionTokenSource
 	httpClient *http.Client
 	publisher  core.Publisher
 	albums     core.AlbumResolver
@@ -45,10 +45,10 @@ type SyncStreamConsumer struct {
 
 // NewSyncStreamConsumer creates a consumer. publisher receives every event.
 // albums returns the album IDs for an asset upsert.
-func NewSyncStreamConsumer(baseURL, apiKey string, publisher core.Publisher, albums core.AlbumResolver) *SyncStreamConsumer {
+func NewSyncStreamConsumer(baseURL string, session SessionTokenSource, publisher core.Publisher, albums core.AlbumResolver) *SyncStreamConsumer {
 	return &SyncStreamConsumer{
 		baseURL:    baseURL,
-		apiKey:     apiKey,
+		session:    session,
 		httpClient: &http.Client{Timeout: 5 * time.Minute},
 		publisher:  publisher,
 		albums:     albums,
@@ -88,16 +88,17 @@ func (s *SyncStreamConsumer) runOnce(ctx context.Context) error {
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.baseURL+"/api/sync/stream", bytes.NewReader(reqBody))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/jsonlines+json")
-	req.Header.Set("x-immich-session-token", s.apiKey)
-
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.do(ctx, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			s.baseURL+"/api/sync/stream", bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/jsonlines+json")
+		req.Header.Set("x-immich-session-token", token)
+		return req, nil
+	})
 	if err != nil {
 		return fmt.Errorf("POST /api/sync/stream: %w", err)
 	}
@@ -180,15 +181,16 @@ func (s *SyncStreamConsumer) ack(ctx context.Context, acks []string) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.baseURL+"/api/sync/ack", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-immich-session-token", s.apiKey)
-
-	resp, err := s.httpClient.Do(req)
+	resp, err := s.do(ctx, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			s.baseURL+"/api/sync/ack", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-immich-session-token", token)
+		return req, nil
+	})
 	if err != nil {
 		return fmt.Errorf("POST /api/sync/ack: %w", err)
 	}
@@ -198,6 +200,32 @@ func (s *SyncStreamConsumer) ack(ctx context.Context, acks []string) error {
 		return fmt.Errorf("sync ack returned %d: %s", resp.StatusCode, b)
 	}
 	return nil
+}
+
+func (s *SyncStreamConsumer) do(ctx context.Context, newRequest func(token string) (*http.Request, error)) (*http.Response, error) {
+	token, err := s.session.Token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := newRequest(token)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	resp.Body.Close()
+
+	token, err = s.session.Renew(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	req, err = newRequest(token)
+	if err != nil {
+		return nil, err
+	}
+	return s.httpClient.Do(req)
 }
 
 // parseSyncStream reads all JSON lines from r. A line that does not decode is an

@@ -12,11 +12,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
-	natsadapter "github.com/herrfennessey/immich-listener/internal/adapters/nats"
 	"github.com/herrfennessey/immich-listener/internal/events"
 	natsclient "github.com/nats-io/nats.go"
 	"github.com/testcontainers/testcontainers-go/modules/compose"
@@ -61,13 +61,8 @@ func TestRealImmichAssetUpsert(t *testing.T) {
 	immichURL := serviceURL(t, ctx, stack, "immich-server", "2283/tcp")
 	natsURL := "nats://" + serviceAddress(t, ctx, stack, "nats", "4222/tcp")
 	client := newRealImmichClient(t, immichURL)
-	assetID := client.uploadImage(t, ctx, "listener-e2e.png", onePixelPNG(t))
+	apiKey := client.createAPIKey(t, ctx)
 
-	pub, err := natsadapter.NewPublisher(ctx, natsURL, "IMMICH", "immich")
-	if err != nil {
-		t.Fatalf("create NATS publisher: %v", err)
-	}
-	defer pub.Close()
 	nc, err := natsclient.Connect(natsURL)
 	if err != nil {
 		t.Fatalf("subscribe to NATS: %v", err)
@@ -81,10 +76,10 @@ func TestRealImmichAssetUpsert(t *testing.T) {
 		t.Fatalf("flush NATS subscription: %v", err)
 	}
 
-	consumer := NewSyncStreamConsumer(immichURL, client.sessionToken, pub, NewAlbumClient(immichURL, client.sessionToken))
-	if err := consumer.runOnce(ctx); err != nil {
-		t.Fatalf("sync uploaded asset: %v", err)
-	}
+	stopSidecar := startSidecar(t, immichURL, natsURL, client.email, client.password, apiKey)
+	defer stopSidecar()
+
+	assetID := client.uploadImage(t, ctx, "listener-e2e.png", onePixelPNG(t))
 
 	message, err := sub.NextMsg(30 * time.Second)
 	if err != nil {
@@ -120,6 +115,8 @@ func immichComposeFile(t *testing.T) string {
 type realImmichClient struct {
 	baseURL      string
 	sessionToken string
+	email        string
+	password     string
 }
 
 func newRealImmichClient(t *testing.T, baseURL string) *realImmichClient {
@@ -141,7 +138,83 @@ func newRealImmichClient(t *testing.T, baseURL string) *realImmichClient {
 	if login.AccessToken == "" {
 		t.Fatal("Immich login returned an empty session token")
 	}
-	return &realImmichClient{baseURL: baseURL, sessionToken: login.AccessToken}
+	return &realImmichClient{baseURL: baseURL, sessionToken: login.AccessToken, email: email, password: password}
+}
+
+func (c *realImmichClient) createAPIKey(t *testing.T, ctx context.Context) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"name":        "listener-e2e",
+		"permissions": []string{"asset.read"},
+	})
+	if err != nil {
+		t.Fatalf("marshal API key request: %v", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/api-keys", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create API key request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-immich-session-token", c.sessionToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create API key: %v", err)
+	}
+	defer resp.Body.Close()
+	response, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read API key response: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("API key status = %d, want %d: %s", resp.StatusCode, http.StatusCreated, response)
+	}
+	var result struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(response, &result); err != nil || result.Secret == "" {
+		t.Fatalf("decode API key response: secret=%q err=%v response=%s", result.Secret, err, response)
+	}
+	return result.Secret
+}
+
+func startSidecar(t *testing.T, immichURL, natsURL, email, password, apiKey string) func() {
+	t.Helper()
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repository root: %v", err)
+	}
+	binary := filepath.Join(t.TempDir(), "immich-listener")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/sidecar")
+	build.Dir = repoRoot
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build sidecar: %v: %s", err, output)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	command := exec.CommandContext(ctx, binary)
+	command.Env = append(os.Environ(),
+		"IMMICH_BASE_URL="+immichURL,
+		"IMMICH_API_KEY="+apiKey,
+		"IMMICH_EMAIL="+email,
+		"IMMICH_PASSWORD="+password,
+		"NATS_URL="+natsURL,
+		"SYNC_INTERVAL=1s",
+		"SOCKETIO_ENABLED=false",
+	)
+	var output bytes.Buffer
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		cancel()
+		t.Fatalf("start sidecar: %v", err)
+	}
+
+	return func() {
+		cancel()
+		if err := command.Wait(); err != nil && ctx.Err() == nil {
+			t.Errorf("sidecar exited unexpectedly: %v: %s", err, output.String())
+		}
+	}
 }
 
 func (c *realImmichClient) uploadImage(t *testing.T, ctx context.Context, filename string, image []byte) string {

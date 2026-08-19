@@ -13,8 +13,12 @@ import (
 type Config struct {
 	// ImmichBaseURL is the Immich server base URL.
 	ImmichBaseURL string `env:"IMMICH_BASE_URL,default=http://immich-server:2283" validate:"required,url"`
-	// ImmichAPIKey is the Immich owner API key.
+	// ImmichAPIKey is used by the optional Socket.IO listener.
 	ImmichAPIKey string `env:"IMMICH_API_KEY" validate:"required"`
+	// ImmichEmail and ImmichPassword create the user session required by the
+	// sync endpoints. Immich intentionally rejects API keys on those endpoints.
+	ImmichEmail    string `env:"IMMICH_EMAIL" validate:"required,email"`
+	ImmichPassword string `env:"IMMICH_PASSWORD" validate:"required"`
 
 	// NATSURL is the NATS server URL.
 	NATSURL string `env:"NATS_URL,default=nats://localhost:4222" validate:"required"`

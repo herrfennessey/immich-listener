@@ -22,7 +22,7 @@ func TestAlbumClient_Albums(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewAlbumClient(srv.URL, "test-key")
+	c := NewAlbumClient(srv.URL, staticSessionTokenSource("test-key"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -47,7 +47,7 @@ func TestAlbumClient_AlbumsEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewAlbumClient(srv.URL, "k")
+	c := NewAlbumClient(srv.URL, staticSessionTokenSource("k"))
 	ids, err := c.Albums(context.Background(), "asset-1")
 	if err != nil {
 		t.Fatalf("Albums error: %v", err)
@@ -63,7 +63,7 @@ func TestAlbumClient_AlbumsHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := NewAlbumClient(srv.URL, "k")
+	c := NewAlbumClient(srv.URL, staticSessionTokenSource("k"))
 	if _, err := c.Albums(context.Background(), "asset-1"); err == nil {
 		t.Fatal("expected error on HTTP 401")
 	}

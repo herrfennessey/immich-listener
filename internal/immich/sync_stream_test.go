@@ -111,7 +111,7 @@ func TestSyncStreamConsumer_RunOnce(t *testing.T) {
 		"asset-1":       {"album-x", "album-y"},
 		"asset-trashed": {"album-z"},
 	}}
-	consumer := NewSyncStreamConsumer(srv.URL, "test-key", pub, albums)
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("test-key"), pub, albums)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -205,7 +205,7 @@ func TestSyncStreamConsumer_ResolverErrorFailsPass(t *testing.T) {
 
 	pub := &capturePublisher{}
 	albums := fakeAlbums{err: fmt.Errorf("immich down")}
-	consumer := NewSyncStreamConsumer(srv.URL, "test-key", pub, albums)
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("test-key"), pub, albums)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -232,7 +232,7 @@ func TestSyncStreamConsumer_TypesArraySent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key", &capturePublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), &capturePublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = consumer.runOnce(ctx)
@@ -261,7 +261,7 @@ func TestSyncStreamConsumer_PublishFailPreventsAck(t *testing.T) {
 	srv, acks := streamAndAckServer(t, makeStreamBody(rows))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "test-key", errPublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("test-key"), errPublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -288,7 +288,7 @@ func TestSyncStreamConsumer_NoAckWhenEmpty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key", &capturePublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), &capturePublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -306,7 +306,7 @@ func TestSyncStreamConsumer_HTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	consumer := NewSyncStreamConsumer(srv.URL, "key", &capturePublisher{}, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), &capturePublisher{}, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := consumer.runOnce(ctx); err == nil {
@@ -331,7 +331,7 @@ func TestSyncStreamConsumer_MalformedLineFailsAndDoesNotAck(t *testing.T) {
 	defer srv.Close()
 
 	pub := &capturePublisher{}
-	consumer := NewSyncStreamConsumer(srv.URL, "key", pub, fakeAlbums{})
+	consumer := NewSyncStreamConsumer(srv.URL, staticSessionTokenSource("key"), pub, fakeAlbums{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := consumer.runOnce(ctx); err == nil {

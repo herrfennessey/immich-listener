@@ -14,15 +14,15 @@ import (
 // core.AlbumResolver.
 type AlbumClient struct {
 	baseURL    string
-	apiKey     string
+	session    SessionTokenSource
 	httpClient *http.Client
 }
 
 // NewAlbumClient creates an AlbumClient.
-func NewAlbumClient(baseURL, apiKey string) *AlbumClient {
+func NewAlbumClient(baseURL string, session SessionTokenSource) *AlbumClient {
 	return &AlbumClient{
 		baseURL:    baseURL,
-		apiKey:     apiKey,
+		session:    session,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -33,14 +33,15 @@ func (c *AlbumClient) Albums(ctx context.Context, assetID string) ([]string, err
 	q := url.Values{"assetId": {assetID}}
 	reqURL := c.baseURL + "/api/albums?" + q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-immich-session-token", c.apiKey)
-
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.do(ctx, func(token string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("x-immich-session-token", token)
+		return req, nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("GET /api/albums: %w", err)
 	}
@@ -63,4 +64,30 @@ func (c *AlbumClient) Albums(ctx context.Context, assetID string) ([]string, err
 		ids = append(ids, a.ID)
 	}
 	return ids, nil
+}
+
+func (c *AlbumClient) do(ctx context.Context, newRequest func(token string) (*http.Request, error)) (*http.Response, error) {
+	token, err := c.session.Token(ctx)
+	if err != nil {
+		return nil, err
+	}
+	req, err := newRequest(token)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+	resp.Body.Close()
+
+	token, err = c.session.Renew(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	req, err = newRequest(token)
+	if err != nil {
+		return nil, err
+	}
+	return c.httpClient.Do(req)
 }

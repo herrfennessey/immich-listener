@@ -123,7 +123,8 @@ docker run --rm --network "${IMMICH_NETWORK:-immich_default}" curlimages/curl \
 ## Running with Docker Compose
 
 ```sh
-# 1. Copy the example env file, fill in your Immich API key, and set IMMICH_NETWORK
+# 1. Copy the example env file, fill in an Immich API key plus the credentials
+#    for the user that owns this sidecar's sync checkpoint, and set IMMICH_NETWORK
 #    (see "Connecting to Immich" above).
 cp .env.example .env
 $EDITOR .env
@@ -139,7 +140,9 @@ docker compose logs -f sidecar
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `IMMICH_API_KEY` | **required** | Immich owner API key. |
+| `IMMICH_API_KEY` | **required** | Immich API key for the Socket.IO listener. |
+| `IMMICH_EMAIL` | **required** | Email for the Immich user session used by durable sync. |
+| `IMMICH_PASSWORD` | **required** | Password for the Immich user session used by durable sync. |
 | `IMMICH_NETWORK` | `immich_default` | Name of Immich's Docker network to attach to (see "Connecting to Immich"). Compose-only. |
 | `IMMICH_BASE_URL` | `http://immich-server:2283` | Immich server base URL. |
 | `NATS_URL` | `nats://localhost:4222` | NATS server URL. |

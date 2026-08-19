@@ -7,6 +7,8 @@ import (
 )
 
 func TestLoad_MissingAPIKey(t *testing.T) {
+	t.Setenv("IMMICH_EMAIL", "listener@example.com")
+	t.Setenv("IMMICH_PASSWORD", "test-password")
 	os.Unsetenv("IMMICH_API_KEY")
 	_, err := Load()
 	if err == nil {
@@ -15,14 +17,27 @@ func TestLoad_MissingAPIKey(t *testing.T) {
 }
 
 func TestLoad_EmptyAPIKey(t *testing.T) {
+	t.Setenv("IMMICH_EMAIL", "listener@example.com")
+	t.Setenv("IMMICH_PASSWORD", "test-password")
 	t.Setenv("IMMICH_API_KEY", "")
 	if _, err := Load(); err == nil {
 		t.Fatal("expected error when IMMICH_API_KEY is set but empty")
 	}
 }
 
+func TestLoad_MissingSessionCredentials(t *testing.T) {
+	t.Setenv("IMMICH_API_KEY", "test-key")
+	os.Unsetenv("IMMICH_EMAIL")
+	os.Unsetenv("IMMICH_PASSWORD")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when session credentials are missing")
+	}
+}
+
 func TestLoad_NonPositiveSyncInterval(t *testing.T) {
 	t.Setenv("IMMICH_API_KEY", "test-key")
+	t.Setenv("IMMICH_EMAIL", "listener@example.com")
+	t.Setenv("IMMICH_PASSWORD", "test-password")
 	for _, v := range []string{"0s", "-5s"} {
 		t.Setenv("SYNC_INTERVAL", v)
 		if _, err := Load(); err == nil {
@@ -33,6 +48,8 @@ func TestLoad_NonPositiveSyncInterval(t *testing.T) {
 
 func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("IMMICH_API_KEY", "test-key")
+	t.Setenv("IMMICH_EMAIL", "listener@example.com")
+	t.Setenv("IMMICH_PASSWORD", "test-password")
 	os.Unsetenv("IMMICH_BASE_URL")
 	os.Unsetenv("NATS_URL")
 	os.Unsetenv("NATS_STREAM_NAME")
@@ -66,6 +83,8 @@ func TestLoad_Defaults(t *testing.T) {
 
 func TestLoad_CustomValues(t *testing.T) {
 	t.Setenv("IMMICH_API_KEY", "my-key")
+	t.Setenv("IMMICH_EMAIL", "listener@example.com")
+	t.Setenv("IMMICH_PASSWORD", "test-password")
 	t.Setenv("IMMICH_BASE_URL", "http://immich:8080")
 	t.Setenv("NATS_URL", "nats://nats:4222")
 	t.Setenv("SYNC_INTERVAL", "1m")
@@ -80,6 +99,9 @@ func TestLoad_CustomValues(t *testing.T) {
 	}
 	if cfg.ImmichAPIKey != "my-key" {
 		t.Errorf("ImmichAPIKey = %q", cfg.ImmichAPIKey)
+	}
+	if cfg.ImmichEmail != "listener@example.com" || cfg.ImmichPassword != "test-password" {
+		t.Errorf("session credentials = %q, %q", cfg.ImmichEmail, cfg.ImmichPassword)
 	}
 	if cfg.SyncInterval != time.Minute {
 		t.Errorf("SyncInterval = %v", cfg.SyncInterval)
