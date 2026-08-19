@@ -32,3 +32,9 @@ jobs:
           cache: true
       - run: docker version
       - run: go test -tags=integration ./internal/immich -v
+
+  compose-volume-init:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: IMMICH_NETWORK=bridge IMMICH_EMAIL=listener@example.com IMMICH_PASSWORD=test docker compose run --rm --no-deps sidecar-init

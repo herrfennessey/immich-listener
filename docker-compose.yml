@@ -10,6 +10,16 @@ services:
       - nats-data:/data
     restart: unless-stopped
 
+  # Named volumes mount root-owned. Initialize this dedicated volume for the
+  # distroless nonroot sidecar before it persists its session token.
+  sidecar-init:
+    image: alpine:3.21
+    command: ["sh", "-ec", "chown -R 65532:65532 /data"]
+    user: "0:0"
+    volumes:
+      - sidecar-data:/data
+    restart: "no"
+
   sidecar:
     build: .
     environment:
@@ -26,7 +36,10 @@ services:
       - default # reach nats over this project's network
       - immich  # reach immich-server over Immich's network (external, below)
     depends_on:
-      - nats
+      nats:
+        condition: service_started
+      sidecar-init:
+        condition: service_completed_successfully
     volumes:
       - sidecar-data:/data
     restart: unless-stopped

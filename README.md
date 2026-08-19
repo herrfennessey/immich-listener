@@ -142,7 +142,7 @@ docker compose logs -f sidecar
 |----------|---------|-------------|
 | `IMMICH_EMAIL` | **required** | Email for the Immich user session used by durable sync and Socket.IO. |
 | `IMMICH_PASSWORD` | **required** | Password for the Immich user session used by durable sync and Socket.IO. |
-| `IMMICH_SESSION_TOKEN_FILE` | `/data/session-token` | Persistent account-bound session token. Keep it under the writable `/data` volume to preserve Immich's server-side sync checkpoint across restarts. |
+| `IMMICH_SESSION_TOKEN_FILE` | `/data/session-token` | Persistent account-bound session token. The Compose `sidecar-init` service makes the dedicated `/data` volume writable before the sidecar starts, preserving Immich's server-side sync checkpoint across restarts. |
 | `IMMICH_NETWORK` | `immich_default` | Name of Immich's Docker network to attach to (see "Connecting to Immich"). Compose-only. |
 | `IMMICH_BASE_URL` | `http://immich-server:2283` | Immich server base URL. |
 | `NATS_URL` | `nats://localhost:4222` | NATS server URL. |
