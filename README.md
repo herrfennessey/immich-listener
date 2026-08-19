@@ -157,12 +157,12 @@ docker compose logs -f sidecar
 go test -race ./...
 ```
 
-### Real Immich integration test
+### Immich end-to-end tests
 
-Docker is required for the real-stack test:
+Docker is required for the Immich end-to-end suite:
 
 ```sh
-go test -tags=integration ./internal/immich -run TestRealImmichAssetUpsert -v
+go test -tags=integration ./internal/immich -v
 ```
 
 Testcontainers starts a disposable Immich v3.1.0 release-runtime stack with
