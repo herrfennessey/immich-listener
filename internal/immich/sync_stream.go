@@ -230,22 +230,30 @@ func (s *SyncStreamConsumer) do(ctx context.Context, newRequest func(token strin
 
 // parseSyncStream reads all JSON lines from r. A line that does not decode is an
 // error, so the caller can keep the cursor and replay the batch.
+//
+// It reads with bufio.Reader rather than bufio.Scanner: Scanner caps a single
+// token (here a JSON line) and would return ErrTooLong on an oversized row,
+// which — because the batch cannot then be acked — becomes a permanent poison
+// line that replays forever. ReadBytes has no line-length limit.
 func parseSyncStream(r io.Reader) ([]syncRow, error) {
 	var rows []syncRow
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(bytes.TrimSpace(line)) == 0 {
-			continue
+	br := bufio.NewReader(r)
+	for {
+		line, readErr := br.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			var row syncRow
+			if err := json.Unmarshal(line, &row); err != nil {
+				return nil, fmt.Errorf("unparseable sync line %q: %w", string(line), err)
+			}
+			rows = append(rows, row)
 		}
-		var row syncRow
-		if err := json.Unmarshal(line, &row); err != nil {
-			return nil, fmt.Errorf("unparseable sync line %q: %w", string(line), err)
+		if readErr != nil {
+			if readErr == io.EOF {
+				return rows, nil
+			}
+			return nil, readErr
 		}
-		rows = append(rows, row)
 	}
-	return rows, scanner.Err()
 }
 
 // collectAcks returns the last ack string for each entity type. It drops

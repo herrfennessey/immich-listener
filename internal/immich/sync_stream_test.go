@@ -345,6 +345,25 @@ func TestSyncStreamConsumer_MalformedLineFailsAndDoesNotAck(t *testing.T) {
 	}
 }
 
+// A single line larger than bufio.Scanner's old 4MB cap must still parse, so an
+// oversized row can never become a permanent poison line that blocks the cursor.
+func TestParseSyncStream_OversizedLine(t *testing.T) {
+	huge := strings.Repeat("x", 8*1024*1024) // 8 MiB, well past the old 4 MiB cap
+	row := syncRow{Type: "AlbumV2", Ack: "AlbumV2|1", Data: syncData{ID: "album-1", Description: huge}}
+	body := makeStreamBody([]any{row})
+
+	rows, err := parseSyncStream(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("parseSyncStream on an oversized line: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("parsed %d rows, want 1", len(rows))
+	}
+	if len(rows[0].Data.Description) != len(huge) {
+		t.Errorf("description length = %d, want %d", len(rows[0].Data.Description), len(huge))
+	}
+}
+
 func TestSyncRowToEvent_AllTypes(t *testing.T) {
 	tests := []struct {
 		row     syncRow

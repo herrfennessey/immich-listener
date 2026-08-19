@@ -198,6 +198,71 @@ func TestSocketListener_ReconnectsOnError(t *testing.T) {
 	}
 }
 
+func TestSocketListener_BackoffResetOnlyAfterConnectAck(t *testing.T) {
+	// The server accepts the WS upgrade and sends the Engine.IO open, but never
+	// sends the Socket.IO namespace CONNECT ack ("40") — e.g. the token is
+	// rejected at the namespace level. onConnect must NOT fire, so the caller's
+	// back-off is not reset into a tight reconnect loop.
+	srv := wsServer(t, []string{`0{"sid":"x","pingInterval":25000,"pingTimeout":20000}`})
+	defer srv.Close()
+
+	wake := make(chan struct{}, 1)
+	l := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
+	connected := false
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = l.connect(ctx, func() { connected = true })
+
+	if connected {
+		t.Error("onConnect must not fire before the Socket.IO connect ack '40'")
+	}
+}
+
+func TestSocketListener_BackoffResetAfterConnectAck(t *testing.T) {
+	// With the namespace CONNECT ack present, onConnect fires exactly once.
+	srv := wsServer(t, []string{`0{"sid":"x","pingInterval":25000,"pingTimeout":20000}`, "40"})
+	defer srv.Close()
+
+	wake := make(chan struct{}, 1)
+	l := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
+	connects := 0
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = l.connect(ctx, func() { connects++ })
+
+	if connects != 1 {
+		t.Errorf("onConnect fired %d times, want 1 (on the '40' ack)", connects)
+	}
+}
+
+func TestSocketListener_ReadDeadlineClosesSilentConn(t *testing.T) {
+	// The server accepts, sends the open frame, then goes silent (no pings).
+	// The per-read deadline must fire so connect returns instead of blocking.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, _ := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		defer conn.CloseNow()
+		_ = conn.Write(r.Context(), websocket.MessageText,
+			[]byte(`0{"sid":"x","pingInterval":25000,"pingTimeout":20000}`))
+		time.Sleep(2 * time.Second) // stay silent past the client's read deadline
+	}))
+	defer srv.Close()
+
+	wake := make(chan struct{}, 1)
+	l := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
+	l.readTimeout = 150 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err := l.connect(ctx, func() {})
+	if err == nil {
+		t.Fatal("expected a read error from a silent (half-open) connection")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("connect blocked %v; read deadline not enforced", elapsed)
+	}
+}
+
 // buildSocketEvent encodes a Socket.IO event packet for the given name and args.
 func buildSocketEvent(name string, args any) string {
 	var parts []any
