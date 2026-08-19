@@ -48,7 +48,7 @@ func TestHandleFrame_OpenSendsSocketIOConnect(t *testing.T) {
 	defer srv.Close()
 
 	wake := make(chan struct{}, 1)
-	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
+	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = listener.connect(ctx, func() {})
@@ -60,6 +60,32 @@ func TestHandleFrame_OpenSendsSocketIOConnect(t *testing.T) {
 		}
 	default:
 		t.Error("expected Socket.IO connect packet, got nothing")
+	}
+}
+
+func TestSocketListener_AuthenticatesWithSessionToken(t *testing.T) {
+	gotToken := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotToken <- r.Header.Get("x-immich-session-token")
+		conn, _ := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		defer conn.CloseNow()
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer srv.Close()
+
+	wake := make(chan struct{}, 1)
+	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("session-token"), wake)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = listener.connect(ctx, func() {})
+
+	select {
+	case got := <-gotToken:
+		if got != "session-token" {
+			t.Errorf("x-immich-session-token = %q, want session-token", got)
+		}
+	default:
+		t.Fatal("Socket.IO connection did not send a session token")
 	}
 }
 
@@ -78,7 +104,7 @@ func TestHandleFrame_PingRepliedWithPong(t *testing.T) {
 	defer srv.Close()
 
 	wake := make(chan struct{}, 1)
-	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
+	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = listener.connect(ctx, func() {})
@@ -110,7 +136,7 @@ func TestSocketListener_KnownEventSignalsWake(t *testing.T) {
 			defer srv.Close()
 
 			wake := make(chan struct{}, 1)
-			listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
+			listener := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			_ = listener.connect(ctx, func() {})
@@ -130,7 +156,7 @@ func TestSocketListener_UnknownEventDoesNotSignalWake(t *testing.T) {
 	defer srv.Close()
 
 	wake := make(chan struct{}, 1)
-	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
+	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = listener.connect(ctx, func() {})
@@ -146,10 +172,10 @@ func TestSocketListener_DoorbellOnly_NoBusPublish(t *testing.T) {
 	// The socket listener has no publish function — compile-time guarantee.
 	// This test verifies the struct has no publish field.
 	wake := make(chan struct{}, 1)
-	l := NewSocketListener("http://localhost", "key", wake)
+	l := NewSocketListener("http://localhost", staticSessionTokenSource("key"), wake)
 	// If SocketListener had a publish field this would fail to compile.
 	_ = l.baseURL
-	_ = l.apiKey
+	_ = l.session
 	_ = l.wake
 }
 
@@ -162,7 +188,7 @@ func TestSocketListener_ReconnectsOnError(t *testing.T) {
 	defer srv.Close()
 
 	wake := make(chan struct{}, 1)
-	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), "key", wake)
+	listener := NewSocketListener("http://"+srv.Listener.Addr().String(), staticSessionTokenSource("key"), wake)
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	listener.Run(ctx)

@@ -61,7 +61,6 @@ func TestRealImmichAssetUpsert(t *testing.T) {
 	immichURL := serviceURL(t, ctx, stack, "immich-server", "2283/tcp")
 	natsURL := "nats://" + serviceAddress(t, ctx, stack, "nats", "4222/tcp")
 	client := newRealImmichClient(t, immichURL)
-	apiKey := client.createAPIKey(t, ctx)
 
 	nc, err := natsclient.Connect(natsURL)
 	if err != nil {
@@ -76,7 +75,7 @@ func TestRealImmichAssetUpsert(t *testing.T) {
 		t.Fatalf("flush NATS subscription: %v", err)
 	}
 
-	stopSidecar := startSidecar(t, immichURL, natsURL, client.email, client.password, apiKey)
+	stopSidecar := startSidecar(t, immichURL, natsURL, client.email, client.password, filepath.Join(t.TempDir(), "session-token"))
 	defer stopSidecar()
 
 	assetID := client.uploadImage(t, ctx, "listener-e2e.png", onePixelPNG(t))
@@ -141,43 +140,7 @@ func newRealImmichClient(t *testing.T, baseURL string) *realImmichClient {
 	return &realImmichClient{baseURL: baseURL, sessionToken: login.AccessToken, email: email, password: password}
 }
 
-func (c *realImmichClient) createAPIKey(t *testing.T, ctx context.Context) string {
-	t.Helper()
-	body, err := json.Marshal(map[string]any{
-		"name":        "listener-e2e",
-		"permissions": []string{"asset.read"},
-	})
-	if err != nil {
-		t.Fatalf("marshal API key request: %v", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/api/api-keys", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("create API key request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-immich-session-token", c.sessionToken)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("create API key: %v", err)
-	}
-	defer resp.Body.Close()
-	response, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read API key response: %v", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("API key status = %d, want %d: %s", resp.StatusCode, http.StatusCreated, response)
-	}
-	var result struct {
-		Secret string `json:"secret"`
-	}
-	if err := json.Unmarshal(response, &result); err != nil || result.Secret == "" {
-		t.Fatalf("decode API key response: secret=%q err=%v response=%s", result.Secret, err, response)
-	}
-	return result.Secret
-}
-
-func startSidecar(t *testing.T, immichURL, natsURL, email, password, apiKey string) func() {
+func startSidecar(t *testing.T, immichURL, natsURL, email, password, tokenFile string) func() {
 	t.Helper()
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -194,12 +157,12 @@ func startSidecar(t *testing.T, immichURL, natsURL, email, password, apiKey stri
 	command := exec.CommandContext(ctx, binary)
 	command.Env = append(os.Environ(),
 		"IMMICH_BASE_URL="+immichURL,
-		"IMMICH_API_KEY="+apiKey,
 		"IMMICH_EMAIL="+email,
 		"IMMICH_PASSWORD="+password,
+		"IMMICH_SESSION_TOKEN_FILE="+tokenFile,
 		"NATS_URL="+natsURL,
 		"SYNC_INTERVAL=1s",
-		"SOCKETIO_ENABLED=false",
+		"SOCKETIO_ENABLED=true",
 	)
 	var output bytes.Buffer
 	command.Stdout = &output

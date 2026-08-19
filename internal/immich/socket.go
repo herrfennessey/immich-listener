@@ -20,16 +20,16 @@ import (
 // events. This prevents duplicate events and ID mismatches.
 type SocketListener struct {
 	baseURL string
-	apiKey  string
+	session SessionTokenSource
 	wake    chan<- struct{}
 }
 
 // NewSocketListener creates a listener. wake receives a signal for each known
 // Immich event.
-func NewSocketListener(baseURL, apiKey string, wake chan<- struct{}) *SocketListener {
+func NewSocketListener(baseURL string, session SessionTokenSource, wake chan<- struct{}) *SocketListener {
 	return &SocketListener{
 		baseURL: baseURL,
-		apiKey:  apiKey,
+		session: session,
 		wake:    wake,
 	}
 }
@@ -69,8 +69,12 @@ func (l *SocketListener) connect(ctx context.Context, onConnect func()) error {
 	}
 	wsURL += "/api/socket.io/?EIO=4&transport=websocket"
 
+	token, err := l.session.Token(ctx)
+	if err != nil {
+		return fmt.Errorf("get Immich session token: %w", err)
+	}
 	headers := http.Header{}
-	headers.Set("x-api-key", l.apiKey)
+	headers.Set("x-immich-session-token", token)
 
 	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {

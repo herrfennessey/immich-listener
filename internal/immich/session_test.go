@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
@@ -30,7 +32,7 @@ func TestSessionClient_LogsInAndReusesToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewSessionClient(srv.URL, "listener@example.com", "correct-horse")
+	client := NewSessionClient(srv.URL, "listener@example.com", "correct-horse", filepath.Join(t.TempDir(), "session-token"))
 	first, err := client.Token(context.Background())
 	if err != nil {
 		t.Fatalf("first Token: %v", err)
@@ -56,7 +58,7 @@ func TestSessionClient_RenewsFailedToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewSessionClient(srv.URL, "listener@example.com", "correct-horse")
+	client := NewSessionClient(srv.URL, "listener@example.com", "correct-horse", filepath.Join(t.TempDir(), "session-token"))
 	first, err := client.Token(context.Background())
 	if err != nil {
 		t.Fatalf("first Token: %v", err)
@@ -67,5 +69,25 @@ func TestSessionClient_RenewsFailedToken(t *testing.T) {
 	}
 	if first != "session-1" || second != "session-2" {
 		t.Fatalf("tokens = %q, %q", first, second)
+	}
+}
+
+func TestSessionClient_ReusesPersistedToken(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "session-token")
+	if err := os.WriteFile(tokenFile, []byte("persisted-session\n"), 0o600); err != nil {
+		t.Fatalf("write persisted token: %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("login should not occur when a persisted token exists")
+	}))
+	defer srv.Close()
+
+	client := NewSessionClient(srv.URL, "listener@example.com", "correct-horse", tokenFile)
+	token, err := client.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if token != "persisted-session" {
+		t.Errorf("token = %q, want persisted-session", token)
 	}
 }

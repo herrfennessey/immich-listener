@@ -6,27 +6,16 @@ import (
 	"time"
 )
 
-func TestLoad_MissingAPIKey(t *testing.T) {
+func TestLoad_DoesNotRequireAPIKey(t *testing.T) {
 	t.Setenv("IMMICH_EMAIL", "listener@example.com")
 	t.Setenv("IMMICH_PASSWORD", "test-password")
 	os.Unsetenv("IMMICH_API_KEY")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error when IMMICH_API_KEY is missing")
-	}
-}
-
-func TestLoad_EmptyAPIKey(t *testing.T) {
-	t.Setenv("IMMICH_EMAIL", "listener@example.com")
-	t.Setenv("IMMICH_PASSWORD", "test-password")
-	t.Setenv("IMMICH_API_KEY", "")
-	if _, err := Load(); err == nil {
-		t.Fatal("expected error when IMMICH_API_KEY is set but empty")
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load without IMMICH_API_KEY: %v", err)
 	}
 }
 
 func TestLoad_MissingSessionCredentials(t *testing.T) {
-	t.Setenv("IMMICH_API_KEY", "test-key")
 	os.Unsetenv("IMMICH_EMAIL")
 	os.Unsetenv("IMMICH_PASSWORD")
 	if _, err := Load(); err == nil {
@@ -35,7 +24,6 @@ func TestLoad_MissingSessionCredentials(t *testing.T) {
 }
 
 func TestLoad_NonPositiveSyncInterval(t *testing.T) {
-	t.Setenv("IMMICH_API_KEY", "test-key")
 	t.Setenv("IMMICH_EMAIL", "listener@example.com")
 	t.Setenv("IMMICH_PASSWORD", "test-password")
 	for _, v := range []string{"0s", "-5s"} {
@@ -47,7 +35,6 @@ func TestLoad_NonPositiveSyncInterval(t *testing.T) {
 }
 
 func TestLoad_Defaults(t *testing.T) {
-	t.Setenv("IMMICH_API_KEY", "test-key")
 	t.Setenv("IMMICH_EMAIL", "listener@example.com")
 	t.Setenv("IMMICH_PASSWORD", "test-password")
 	os.Unsetenv("IMMICH_BASE_URL")
@@ -82,7 +69,6 @@ func TestLoad_Defaults(t *testing.T) {
 }
 
 func TestLoad_CustomValues(t *testing.T) {
-	t.Setenv("IMMICH_API_KEY", "my-key")
 	t.Setenv("IMMICH_EMAIL", "listener@example.com")
 	t.Setenv("IMMICH_PASSWORD", "test-password")
 	t.Setenv("IMMICH_BASE_URL", "http://immich:8080")
@@ -96,9 +82,6 @@ func TestLoad_CustomValues(t *testing.T) {
 	}
 	if cfg.ImmichBaseURL != "http://immich:8080" {
 		t.Errorf("ImmichBaseURL = %q", cfg.ImmichBaseURL)
-	}
-	if cfg.ImmichAPIKey != "my-key" {
-		t.Errorf("ImmichAPIKey = %q", cfg.ImmichAPIKey)
 	}
 	if cfg.ImmichEmail != "listener@example.com" || cfg.ImmichPassword != "test-password" {
 		t.Errorf("session credentials = %q, %q", cfg.ImmichEmail, cfg.ImmichPassword)

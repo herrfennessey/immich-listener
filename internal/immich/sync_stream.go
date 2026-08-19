@@ -34,7 +34,7 @@ var syncRequestTypes = []string{
 // sends the same batch again.
 //
 // The sidecar keeps no local cursor. Immich stores the cursor in the
-// session_sync_checkpoint table for the session of the API key.
+// session_sync_checkpoint table for the authenticated user session.
 type SyncStreamConsumer struct {
 	baseURL    string
 	session    SessionTokenSource

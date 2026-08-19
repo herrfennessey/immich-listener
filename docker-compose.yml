@@ -14,7 +14,6 @@ services:
     build: .
     environment:
       IMMICH_BASE_URL: ${IMMICH_BASE_URL:-http://immich-server:2283}
-      IMMICH_API_KEY: ${IMMICH_API_KEY:?IMMICH_API_KEY is required}
       IMMICH_EMAIL: ${IMMICH_EMAIL:?IMMICH_EMAIL is required}
       IMMICH_PASSWORD: ${IMMICH_PASSWORD:?IMMICH_PASSWORD is required}
       NATS_URL: nats://nats:4222
@@ -27,6 +26,8 @@ services:
       - immich  # reach immich-server over Immich's network (external, below)
     depends_on:
       - nats
+    volumes:
+      - sidecar-data:/data
     restart: unless-stopped
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,7 @@ networks:
 
 volumes:
   nats-data:
+  sidecar-data:
   # redis-data:
   # rabbitmq-data:
   # redpanda-data:

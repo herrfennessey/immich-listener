@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,22 +28,24 @@ type SessionTokenSource interface {
 // A rejected token is replaced by signing in again. The rejected token is not
 // persisted, and concurrent callers share the single renewed session.
 type SessionClient struct {
-	baseURL  string
-	email    string
-	password string
-	client   *http.Client
+	baseURL   string
+	email     string
+	password  string
+	tokenFile string
+	client    *http.Client
 
 	mu    sync.Mutex
 	token string
 }
 
 // NewSessionClient creates a session-token source for an Immich user.
-func NewSessionClient(baseURL, email, password string) *SessionClient {
+func NewSessionClient(baseURL, email, password, tokenFile string) *SessionClient {
 	return &SessionClient{
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		email:    email,
-		password: password,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		email:     email,
+		password:  password,
+		tokenFile: tokenFile,
+		client:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -49,6 +53,12 @@ func NewSessionClient(baseURL, email, password string) *SessionClient {
 func (c *SessionClient) Token(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.token != "" {
+		return c.token, nil
+	}
+	if err := c.loadToken(); err != nil {
+		return "", err
+	}
 	if c.token != "" {
 		return c.token, nil
 	}
@@ -104,8 +114,51 @@ func (c *SessionClient) login(ctx context.Context) (string, error) {
 	if result.AccessToken == "" {
 		return "", fmt.Errorf("Immich login returned an empty access token")
 	}
+	if err := c.saveToken(result.AccessToken); err != nil {
+		return "", err
+	}
 	c.token = result.AccessToken
 	return c.token, nil
+}
+
+func (c *SessionClient) loadToken() error {
+	data, err := os.ReadFile(c.tokenFile)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read Immich session token: %w", err)
+	}
+	c.token = strings.TrimSpace(string(data))
+	return nil
+}
+
+func (c *SessionClient) saveToken(token string) error {
+	dir := filepath.Dir(c.tokenFile)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create session token directory: %w", err)
+	}
+	temp, err := os.CreateTemp(dir, ".session-token-")
+	if err != nil {
+		return fmt.Errorf("create session token file: %w", err)
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return fmt.Errorf("set session token permissions: %w", err)
+	}
+	if _, err := temp.WriteString(token + "\n"); err != nil {
+		temp.Close()
+		return fmt.Errorf("write session token: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return fmt.Errorf("close session token: %w", err)
+	}
+	if err := os.Rename(tempName, c.tokenFile); err != nil {
+		return fmt.Errorf("persist session token: %w", err)
+	}
+	return nil
 }
 
 type staticSessionToken string
