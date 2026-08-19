@@ -81,6 +81,11 @@ type loginCredentials struct {
 	Password string `json:"password"`
 }
 
+type persistedSession struct {
+	Email string `json:"email"`
+	Token string `json:"token"`
+}
+
 func (c *SessionClient) login(ctx context.Context) (string, error) {
 	body, err := json.Marshal(loginCredentials{Email: c.email, Password: c.password})
 	if err != nil {
@@ -129,7 +134,14 @@ func (c *SessionClient) loadToken() error {
 	if err != nil {
 		return fmt.Errorf("read Immich session token: %w", err)
 	}
-	c.token = strings.TrimSpace(string(data))
+	var session persistedSession
+	if err := json.Unmarshal(data, &session); err != nil {
+		return nil
+	}
+	if !strings.EqualFold(session.Email, c.email) {
+		return nil
+	}
+	c.token = session.Token
 	return nil
 }
 
@@ -148,7 +160,12 @@ func (c *SessionClient) saveToken(token string) error {
 		temp.Close()
 		return fmt.Errorf("set session token permissions: %w", err)
 	}
-	if _, err := temp.WriteString(token + "\n"); err != nil {
+	data, err := json.Marshal(persistedSession{Email: c.email, Token: token})
+	if err != nil {
+		temp.Close()
+		return fmt.Errorf("marshal session token: %w", err)
+	}
+	if _, err := temp.Write(append(data, '\n')); err != nil {
 		temp.Close()
 		return fmt.Errorf("write session token: %w", err)
 	}

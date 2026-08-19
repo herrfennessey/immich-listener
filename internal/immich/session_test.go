@@ -74,7 +74,7 @@ func TestSessionClient_RenewsFailedToken(t *testing.T) {
 
 func TestSessionClient_ReusesPersistedToken(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "session-token")
-	if err := os.WriteFile(tokenFile, []byte("persisted-session\n"), 0o600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte(`{"email":"listener@example.com","token":"persisted-session"}`), 0o600); err != nil {
 		t.Fatalf("write persisted token: %v", err)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,5 +89,31 @@ func TestSessionClient_ReusesPersistedToken(t *testing.T) {
 	}
 	if token != "persisted-session" {
 		t.Errorf("token = %q, want persisted-session", token)
+	}
+}
+
+func TestSessionClient_DiscardsTokenForDifferentEmail(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "session-token")
+	if err := os.WriteFile(tokenFile, []byte(`{"email":"former@example.com","token":"former-token"}`), 0o600); err != nil {
+		t.Fatalf("write persisted token: %v", err)
+	}
+	var loginCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		loginCalls.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"accessToken":"current-token"}`))
+	}))
+	defer srv.Close()
+
+	client := NewSessionClient(srv.URL, "current@example.com", "correct-horse", tokenFile)
+	token, err := client.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if token != "current-token" {
+		t.Errorf("token = %q, want current-token", token)
+	}
+	if got := loginCalls.Load(); got != 1 {
+		t.Errorf("login calls = %d, want 1", got)
 	}
 }
